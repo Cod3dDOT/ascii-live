@@ -1,0 +1,33 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, arch: x86_64 }
+          - { runner: ubuntu-24.04-arm, arch: aarch64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: cargo test --locked --release
+      - name: Build
+        run: echo "BIN=$(scripts/build-release.sh ${{ matrix.arch }}-unknown-linux-gnu)" >> "$GITHUB_ENV"
+      - name: Package
+        run: |
+          name=situ-${GITHUB_REF_NAME}-${{ matrix.arch }}-linux
+          mkdir "$name"
+          cp -r "$BIN" README.md LICENSES "$name"/
+          tar cJf "$name.tar.xz" "$name"
+          sha256sum "$name.tar.xz" > "$name.tar.xz.sha256"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: situ-*.tar.xz*

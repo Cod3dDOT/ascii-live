@@ -1,0 +1,62 @@
+[package]
+name = "situ"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+description = "Tiny, battery-friendly live ASCII fluid wallpaper for Wayland (wlr-layer-shell)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Cod3dDOT/situ"
+keywords = ["wallpaper", "wayland", "layer-shell", "ascii", "fluid"]
+categories = ["command-line-utilities", "graphics"]
+
+[dependencies]
+fearless_simd = "1"
+fearless_simd_macros = "0.1"
+libc = "0.2"
+smithay-client-toolkit = { version = "0.19", default-features = false, features = ["calloop"] }
+wayland-client = "0.31"
+
+# Only benches/engine.rs is a benchmark (so `cargo bench -- --save x` works).
+[lib]
+bench = false
+
+[[bin]]
+name = "situ"
+path = "src/main.rs"
+bench = false
+
+[[bench]]
+name = "engine"
+harness = false
+
+[lints.cargo]
+unused_dependencies = "warn"
+
+[lints.rust]
+unused_qualifications = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = [
+    "cfg(disable_dispatch_avx512)",
+    "cfg(disable_dispatch_sse4_2)",
+] }
+unreachable_pub = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"
+multiple_unsafe_ops_per_block = "warn"
+cast_lossless = "warn"
+redundant_closure_for_method_calls = "warn"
+semicolon_if_nothing_returned = "warn"
+
+[profile.release]
+opt-level = 3
+# Fat LTO: faster and smaller than thin.
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Release codegen + line tables for profilers (scripts/prof.sh flame / asm).
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = false

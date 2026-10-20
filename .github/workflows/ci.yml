@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# No RUSTFLAGS here: it would replace the size flags in .cargo/config.toml.
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  reuse:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: fsfe/reuse-action@v6
+
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show # installs the toolchain from rust-toolchain.toml
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: cargo test --release
+      - name: Benchmarks build and run
+        run: BENCH_MS=50 cargo bench
+
+  # Real compositor: headless sway (wlroots) at a fractional scale.
+  smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends sway grim
+      - run: cargo build --release
+      - run: ci/smoke.sh target/release/situ
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-screenshots
+          path: target/smoke/

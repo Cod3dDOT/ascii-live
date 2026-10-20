@@ -1,0 +1,10 @@
+# Binary size (see README "Binary size"):
+# - Compile SIMD kernels for AVX2 and SSE2 only; AVX-512 and SSE4.2 CPUs
+#   dispatch to the next level down (no faster for our 8-lane kernels).
+# - Identical code folding in the (default) LLD linker.
+[target.x86_64-unknown-linux-gnu]
+rustflags = [
+    "--cfg", "disable_dispatch_sse4_2",
+    "--cfg", "disable_dispatch_avx512",
+    "-C", "link-arg=-Wl,--icf=all",
+]

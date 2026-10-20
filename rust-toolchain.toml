@@ -1,0 +1,4 @@
+[toolchain]
+# Beta on purpose: the code uses recently stabilized features.
+channel = "beta"
+components = ["clippy", "rustfmt"]
