@@ -160,7 +160,8 @@ pub struct Renderer {
     kw: usize,
     tiles_x: usize,
     tiles_y: usize,
-    states: Vec<BufState>,
+    /// Per-buffer state; `None` marks a removed buffer's reusable slot.
+    states: Vec<Option<BufState>>,
     /// Pending damage per DBLK x DBLK block, in cells: [x0, y0, x1, y1).
     damage: Vec<[u16; 4]>,
     /// Damage blocks per row.
@@ -282,14 +283,28 @@ impl Renderer {
         (w, h, img)
     }
 
-    /// Registers a new (blank) buffer; returns its state index.
+    /// Registers a new (blank) buffer, which starts from a full repaint;
+    /// returns its state index.
     pub fn add_buffer(&mut self) -> usize {
-        let n = self.keys.len();
-        self.states.push(BufState {
-            shown: vec![UNKNOWN; n],
+        let st = Some(BufState {
+            shown: vec![UNKNOWN; self.keys.len()],
             dirty: vec![true; self.tiles_x * self.tiles_y],
         });
-        self.states.len() - 1
+        match self.states.iter().position(Option::is_none) {
+            Some(i) => {
+                self.states[i] = st;
+                i
+            }
+            None => {
+                self.states.push(st);
+                self.states.len() - 1
+            }
+        }
+    }
+
+    /// Forgets buffer `state` (its memory was freed); the index is reused.
+    pub fn remove_buffer(&mut self, state: usize) {
+        self.states[state] = None;
     }
 
     pub fn has_damage(&self) -> bool {
@@ -315,7 +330,7 @@ impl Renderer {
     fn invalidate(&mut self, i: usize, j: usize) {
         let c = j * self.kw + i;
         let t = (j / TILE) * self.tiles_x + i / TILE;
-        for st in &mut self.states {
+        for st in self.states.iter_mut().flatten() {
             st.shown[c] = UNKNOWN;
             st.dirty[t] = true;
         }
@@ -488,7 +503,7 @@ fn sync_impl<S: Simd>(simd: S, r: &mut Renderer, sim: &mut Sim) -> Option<[usize
         if changed {
             let ti = ty * r.tiles_x + tx;
             r.any_damage = true;
-            for st in &mut r.states {
+            for st in r.states.iter_mut().flatten() {
                 st.dirty[ti] = true;
             }
         }
@@ -519,7 +534,7 @@ fn copy_row<S: Simd>(simd: S, dst: &mut [u32], src: &[u32]) {
 
 #[simd]
 fn paint_impl<S: Simd>(simd: S, r: &mut Renderer, state: usize, px: &mut [u32], stride: usize) {
-    let st = &mut r.states[state];
+    let st = r.states[state].as_mut().expect("painting a removed buffer");
     let (l, cs) = (&r.layout, r.layout.cell);
     for t in 0..st.dirty.len() {
         if !std::mem::take(&mut st.dirty[t]) {

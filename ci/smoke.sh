@@ -62,6 +62,15 @@ t1=$(ticks)
 echo "idle CPU ticks over 3s: $((t1 - t0))"
 [ $((t1 - t0)) -le 1 ] || { echo "not idle"; exit 1; }
 
+# Settled for >3s: buffers the compositor released are freed (how many it
+# keeps is its choice, so this is informational), and the screen must not
+# change: the compositor keeps showing what it was given.
+shm=$(awk '/^RssShmem:/ {print $2}' "/proc/$second/status")
+echo "settled shm RSS: ${shm} kB"
+grim -t ppm "$out/trimmed.ppm"
+coverage "$out/trimmed.ppm"
+cmp -s "$out/screen.ppm" "$out/trimmed.ppm" || { echo "screen changed after trim"; exit 1; }
+
 kill -TSTP "$second"
 sleep 0.5
 if kill -0 "$second" 2>/dev/null; then

@@ -176,6 +176,38 @@ fn pointer_force_is_frame_rate_independent() {
     }
 }
 
+/// After freeing every buffer (settled outputs trim their shm memory), a
+/// new buffer must start from a full repaint, not just the latest changes.
+#[test]
+fn fresh_buffer_after_clear_is_complete() {
+    for glow in [0.0, 0.6] {
+        let mut cfg = config();
+        cfg.style.glow = glow;
+        let (mut sim, mut r) = setup(&cfg, Level::new());
+        let (cols, rows) = (r.layout.cols, r.layout.rows);
+        let s = r.add_buffer();
+        let mut px = vec![0u32; W * H];
+        let mut frames = 0;
+        workload::episode(&mut sim, cfg.fps, cols, rows, |sim, _| {
+            frames += 1;
+            if frames <= 30 {
+                r.sync(sim);
+                r.paint(sim.level(), s, bytes(&mut px), W * 4);
+                r.take_damage();
+            }
+        });
+        // Mid-way state painted; then the sim moved on unseen, buffer freed.
+        r.remove_buffer(s);
+        r.sync(&mut sim);
+        let s2 = r.add_buffer();
+        assert_eq!(s2, s, "freed state slots are reused");
+        let s = s2;
+        let mut fresh = vec![0u32; W * H];
+        r.paint(sim.level(), s, bytes(&mut fresh), W * 4);
+        assert!(fresh == reference(&cfg, &mut sim), "glow {glow}");
+    }
+}
+
 /// Dye field after a fixed number of workload frames at `level`.
 fn dye_after(cfg: &Config, level: Level, frames: usize) -> Vec<f32> {
     let (mut sim, r) = setup(cfg, level);

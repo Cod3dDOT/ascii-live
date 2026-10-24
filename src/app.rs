@@ -2,7 +2,8 @@
 //! Frames are capped to `fps` and gated on frame callbacks, so hidden outputs
 //! stop ticking; once the fluid settles the process sleeps until input.
 //! Static mode frees sim, renderer and buffers after the first commit (the
-//! compositor keeps its own copy).
+//! compositor keeps its own copy); interactive outputs free their buffers
+//! once settled for a few seconds.
 
 use std::time::{Duration, Instant};
 
@@ -75,6 +76,9 @@ fn shm_failed(ok: &mut bool, what: &str, e: impl std::fmt::Display) -> Present {
 }
 
 struct Buf {
+    /// One pool per buffer: `SlotPool` never shrinks, so freeing a buffer
+    /// only returns memory if its pool goes too.
+    pool: SlotPool,
     buffer: Buffer,
     /// Renderer-side state index for this buffer.
     state: usize,
@@ -85,6 +89,12 @@ struct View {
     sim: Sim,
     bufs: Vec<Buf>,
 }
+
+/// Settled this long, an output frees every shm buffer the compositor has
+/// released; the next interaction repaints a fresh one. Compositors that
+/// copy shm on commit (wlroots) release them all, so nothing stays mapped;
+/// others (smithay/niri) hold the attached buffer until it is replaced.
+const TRIM_AFTER: Duration = Duration::from_secs(3);
 
 struct Out {
     output: wl_output::WlOutput,
@@ -99,6 +109,8 @@ struct Out {
     view: Option<View>,
     pacer: Pacer,
     timer: Option<RegistrationToken>,
+    /// Pending buffer trim.
+    trim: Option<RegistrationToken>,
     cursor: Option<(f32, f32)>,
 }
 
@@ -109,8 +121,6 @@ pub struct App {
     compositor: CompositorState,
     layer_shell: LayerShell,
     shm: Shm,
-    /// Created on demand; dropped in static mode once every output is drawn.
-    pool: Option<SlotPool>,
     /// False while presents fail, so each outage is logged once.
     shm_ok: bool,
     cursor_shape: Option<CursorShapeManager>,
@@ -146,7 +156,6 @@ pub fn run(cfg: Config) -> Result<!, Box<dyn std::error::Error>> {
         layer_shell: LayerShell::bind(&globals, &qh)
             .map_err(|_| "compositor lacks wlr-layer-shell")?,
         shm,
-        pool: None,
         shm_ok: true,
         cursor_shape: CursorShapeManager::bind(&globals, &qh).ok(),
         fractional: globals
@@ -187,7 +196,7 @@ impl App {
     fn remove(&mut self, i: usize) {
         let cell = self.span_cell();
         let out = self.outs.remove(i);
-        if let Some(t) = out.timer {
+        for t in [out.timer, out.trim].into_iter().flatten() {
             self.handle.remove(t);
         }
         if let Some((f, v)) = out.frac {
@@ -276,6 +285,7 @@ impl App {
             let wait = self.outs[i].pacer.retry();
             self.arm(i, wait);
         }
+        self.arm_trim(i);
     }
 
     /// Paints changed cells into a free buffer and commits.
@@ -290,33 +300,34 @@ impl App {
         }
         let l = &view.renderer.layout;
         let (w, h) = (l.width as i32, l.height as i32);
-        let pool = match &mut self.pool {
-            Some(p) => p,
-            None => match SlotPool::new((w * h * 4) as usize, &self.shm) {
-                Ok(p) => self.pool.insert(p),
-                Err(e) => return shm_failed(&mut self.shm_ok, "shm pool", e),
-            },
-        };
         let free = view
             .bufs
-            .iter()
-            .position(|b| b.buffer.canvas(pool).is_some());
+            .iter_mut()
+            .position(|b| b.buffer.canvas(&mut b.pool).is_some());
         let idx = match free {
             Some(idx) => idx,
             None if view.bufs.len() < 3 => {
+                let mut pool = match SlotPool::new((w * h * 4) as usize, &self.shm) {
+                    Ok(p) => p,
+                    Err(e) => return shm_failed(&mut self.shm_ok, "shm pool", e),
+                };
                 let buffer = match pool.create_buffer(w, h, w * 4, wl_shm::Format::Xrgb8888) {
                     Ok((buffer, _)) => buffer,
                     Err(e) => return shm_failed(&mut self.shm_ok, "shm buffer", e),
                 };
                 let state = view.renderer.add_buffer();
-                view.bufs.push(Buf { buffer, state });
+                view.bufs.push(Buf {
+                    pool,
+                    buffer,
+                    state,
+                });
                 view.bufs.len() - 1
             }
             // Compositor holds every buffer; retry on the next tick.
             None => return Present::Busy,
         };
-        let buf = &view.bufs[idx];
-        let Some(canvas) = buf.buffer.canvas(pool) else {
+        let buf = &mut view.bufs[idx];
+        let Some(canvas) = buf.buffer.canvas(&mut buf.pool) else {
             return Present::Busy;
         };
         view.renderer
@@ -335,9 +346,6 @@ impl App {
             out.layer.commit();
             // The compositor has (or will copy) the pixels; free everything.
             out.view = None;
-            if self.outs.iter().all(|o| o.view.is_none()) {
-                self.pool = None;
-            }
             return Present::Committed;
         }
         surface.frame(&self.qh, surface.clone());
@@ -391,6 +399,48 @@ impl App {
             .pacer
             .presented(present, active, Instant::now());
         self.arm(i, wait);
+        if !active {
+            self.arm_trim(i);
+        }
+    }
+
+    /// Frees output `i`'s released shm buffers once it has stayed settled
+    /// for [`TRIM_AFTER`].
+    fn arm_trim(&mut self, i: usize) {
+        let out = &mut self.outs[i];
+        if out.trim.is_some() || out.view.as_ref().is_none_or(|v| v.bufs.is_empty()) {
+            return;
+        }
+        let id = out.layer.wl_surface().id();
+        out.trim = self
+            .handle
+            .insert_source(Timer::from_duration(TRIM_AFTER), move |_, _, app| {
+                app.on_trim(&id);
+                TimeoutAction::Drop
+            })
+            .ok();
+    }
+
+    fn on_trim(&mut self, id: &ObjectId) {
+        let Some(i) = self.find_id(id) else { return };
+        let out = &mut self.outs[i];
+        out.trim = None;
+        let Some(view) = out.view.as_mut() else {
+            return;
+        };
+        // Animating again: the next settle re-arms.
+        if view.sim.active() || out.timer.is_some() || view.renderer.has_damage() {
+            return;
+        }
+        // Buffers the compositor still holds stay (it may need them).
+        let renderer = &mut view.renderer;
+        view.bufs.retain_mut(|b| {
+            let held = b.buffer.canvas(&mut b.pool).is_none();
+            if !held {
+                renderer.remove_buffer(b.state);
+            }
+            held
+        });
     }
 
     fn wake(&mut self, i: usize) {
@@ -598,6 +648,7 @@ impl OutputHandler for App {
             view: None,
             pacer: Pacer::new(self.cfg.rate(), refresh, Instant::now()),
             timer: None,
+            trim: None,
             cursor: None,
         });
     }
