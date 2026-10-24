@@ -45,30 +45,38 @@ fn reference(cfg: &Config, sim: &mut Sim) -> Vec<u32> {
     px
 }
 
+/// At the default rate and at a high display rate (`--fps 0` on 165 Hz).
 #[test]
 fn settles_to_exact_rest_image() {
-    let cfg = config();
-    let (mut sim, mut r) = setup(&cfg, Level::new());
-    let (cols, rows) = (r.layout.cols, r.layout.rows);
-    let s = r.add_buffer();
-    let mut px = vec![0u32; W * H];
-    r.sync(&mut sim);
-    r.paint(sim.level(), s, bytes(&mut px), W * 4);
-    let rest = px.clone();
-
-    let mut stirred = false;
-    workload::episode(&mut sim, cfg.fps, cols, rows, |sim, _| {
-        r.sync(sim);
+    for fps in [60.0, 165.0] {
+        let mut cfg = config();
+        cfg.fps = fps;
+        let (mut sim, mut r) = setup(&cfg, Level::new());
+        let (cols, rows) = (r.layout.cols, r.layout.rows);
+        let s = r.add_buffer();
+        let mut px = vec![0u32; W * H];
+        r.sync(&mut sim);
         r.paint(sim.level(), s, bytes(&mut px), W * 4);
-        stirred |= px != rest;
-    });
-    assert!(stirred, "the workload should change the image");
-    assert!(
-        !sim.active(),
-        "did not settle within {}s",
-        workload::MAX_SECONDS
-    );
-    assert!(px == rest, "settled image differs from the rest image");
+        let rest = px.clone();
+
+        let mut stirred = false;
+        let frames = workload::episode(&mut sim, cfg.fps, cols, rows, |sim, _| {
+            r.sync(sim);
+            r.paint(sim.level(), s, bytes(&mut px), W * 4);
+            stirred |= px != rest;
+        });
+        eprintln!("{fps} fps: settled after {:.2}s", frames as f32 / fps);
+        assert!(stirred, "the workload should change the image");
+        assert!(
+            !sim.active(),
+            "{fps} fps: did not settle within {}s",
+            workload::MAX_SECONDS
+        );
+        assert!(
+            px == rest,
+            "{fps} fps: settled image differs from the rest image"
+        );
+    }
 }
 
 #[test]
@@ -141,11 +149,11 @@ fn drag_stir(fps: f32) -> f32 {
 #[test]
 fn pointer_force_is_frame_rate_independent() {
     let base = drag_stir(60.0);
-    for fps in [20.0, 30.0, 144.0] {
+    for fps in [20.0, 30.0, 144.0, 165.0, 240.0] {
         let ratio = drag_stir(fps) / base;
         eprintln!("{fps:>5} fps: stir ratio vs 60 fps {ratio:.3}");
         assert!(
-            (0.8..1.25).contains(&ratio),
+            (0.9..1.1).contains(&ratio),
             "{fps} fps stirs {ratio:.2}x as much as 60 fps"
         );
     }

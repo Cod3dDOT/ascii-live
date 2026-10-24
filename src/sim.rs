@@ -19,7 +19,10 @@ const PRESSURE_ITERS: usize = 24;
 const VEL_EPS: f32 = 0.2;
 /// Linear drag (dye cells/s^2) so velocity reaches zero in finite time.
 const DRAG: f32 = 0.6;
-const DYE_SNAP: f32 = 0.04;
+/// Deviations under `DYE_SNAP_RATE * dt` glyph steps snap to rest, ending
+/// invisible tails (0.04 at 1/60 s, about one tone step). Scaled by the step
+/// so small steps don't erase a larger share of fresh motion.
+const DYE_SNAP_RATE: f32 = 2.4;
 /// Linear dye relaxation (glyph steps/s) on top of the exponential one.
 const DYE_LIN: f32 = 0.35;
 /// Substeps per frame cap: frames up to 1/15 s keep steps <= 1/60 s (CFL).
@@ -557,11 +560,25 @@ fn advect<S: Simd>(
     }
 }
 
+/// Per-step dye relaxation toward rest: `|d - r| * decay - lin`, then
+/// deviations under `snap` are dropped.
+#[derive(Clone, Copy)]
+struct Relax {
+    decay: f32,
+    lin: f32,
+    snap: f32,
+}
+
 /// Relaxes `d` toward `r` in place; returns the max remaining |d - r|.
 #[simd]
-fn relax<S: Simd>(simd: S, d: &mut [f32], r: &[f32], decay: f32, lin: f32) -> f32 {
+fn relax<S: Simd>(simd: S, d: &mut [f32], r: &[f32], rx: Relax) -> f32 {
+    let Relax {
+        decay,
+        lin,
+        snap: snap1,
+    } = rx;
     let (vdecay, vlin) = (f32x8::splat(simd, decay), f32x8::splat(simd, lin));
-    let (zero, snap) = (f32x8::splat(simd, 0.0), f32x8::splat(simd, DYE_SNAP));
+    let (zero, snap) = (f32x8::splat(simd, 0.0), f32x8::splat(simd, snap1));
     let r = &r[..d.len()];
     let (dc, dt) = d.as_chunks_mut::<L>();
     let (rc, rt) = r.as_chunks::<L>();
@@ -578,7 +595,7 @@ fn relax<S: Simd>(simd: S, d: &mut [f32], r: &[f32], decay: f32, lin: f32) -> f3
     for (d, &r) in dt.iter_mut().zip(rt) {
         let diff = *d - r;
         let mut mag = (diff.abs() * decay - lin).max(0.0);
-        if mag < DYE_SNAP {
+        if mag < snap1 {
             mag = 0.0;
         }
         m = m.max(mag);
@@ -773,7 +790,7 @@ fn dye_span<S: Simd>(
     rest: &[f32],
     (ua, ub, va, vb): (&[f32], &[f32], &[f32], &[f32]),
     fy: f32,
-    (decay, lin): (f32, f32),
+    Relax { decay, lin, snap }: Relax,
     st: usize,
     base: usize,
     tile_max: &mut [f32],
@@ -784,7 +801,7 @@ fn dye_span<S: Simd>(
         f32x8::splat(simd, fy),
         f32x8::splat(simd, decay),
         f32x8::splat(simd, lin),
-        f32x8::splat(simd, DYE_SNAP),
+        f32x8::splat(simd, snap),
     );
     let n = tile_max.len() * TILE;
     let sten = Stencil::new(src, base, st, n);
@@ -938,8 +955,11 @@ fn velocity_step<S: Simd>(simd: S, s: &mut Sim, r: Rect, dt: f32) {
 #[simd]
 fn dye_step<S: Simd>(simd: S, s: &mut Sim, rect: Option<Rect>, dt: f32) {
     let (ds, dw, k) = (s.ds, s.dw, s.k);
-    let decay = (-dt / s.p.relax).exp();
-    let lin = DYE_LIN * dt;
+    let rx = Relax {
+        decay: (-dt / s.p.relax).exp(),
+        lin: DYE_LIN * dt,
+        snap: DYE_SNAP_RATE * dt,
+    };
 
     // Which dye tiles see velocity this step (bilinear support: +-1 vel cell).
     s.adv.fill(false);
@@ -1010,7 +1030,7 @@ fn dye_step<S: Simd>(simd: S, s: &mut Sim, rect: Option<Rect>, dt: f32) {
                         &s.rest,
                         rows,
                         fy,
-                        (decay, lin),
+                        rx,
                         ds,
                         base,
                         tm,
@@ -1048,7 +1068,7 @@ fn dye_step<S: Simd>(simd: S, s: &mut Sim, rect: Option<Rect>, dt: f32) {
                     s.rest[b..b + xn].as_chunks::<TILE>().0,
                 );
                 for ((d, r), m) in d.iter_mut().zip(r).zip(tm.iter_mut()) {
-                    *m = m.max(relax(simd, d, r, decay, lin));
+                    *m = m.max(relax(simd, d, r, rx));
                 }
             }
             for (i, &m) in tm.iter().enumerate() {
