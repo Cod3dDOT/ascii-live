@@ -56,7 +56,7 @@ across them, following your output layout.
 
 ```
 Mode:    --static  --span
-Color:   --color HEX  --bg HEX  --gamma F
+Color:   --color HEX  --bg HEX  --gamma F  --dim F
 Look:    --ramp STR  --rows N  --scale F  --octaves N  --warp F
          --blank F  --contrast F  --seed N
 Motion:  --fps F  --damping F  --relax S  --vorticity F  --force F

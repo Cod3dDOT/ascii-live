@@ -5,6 +5,11 @@
 
 #![allow(clippy::excessive_precision)]
 
+/// Default OKLab lightness of the dimmest glyph tone.
+pub const DIM: f32 = 0.40;
+/// Lightness of the middle stop; `dim` stays below it.
+const MID: f32 = 0.68;
+
 pub struct Palette {
     pub bg: [u8; 3],
     /// (OKLab lightness, OKLCH chroma, hue°), from dim to bright.
@@ -102,11 +107,20 @@ impl Palette {
         Self {
             bg: background,
             stops: [
-                [0.40, chroma * 0.42, hue - shift],
-                [0.68, chroma * 0.90, hue],
+                [DIM, chroma * 0.42, hue - shift],
+                [MID, chroma * 0.90, hue],
                 [0.92, chroma * 0.52, hue + shift],
             ],
         }
+    }
+
+    /// Sets the dimmest tone's OKLab lightness (default [`DIM`]). Lower
+    /// values let clusters fade deeper into the background. Clamped to stay
+    /// above the background and below the middle stop.
+    pub fn with_dim(mut self, dim: f32) -> Self {
+        let floor = oklch_of(self.bg)[0] + 0.02;
+        self.stops[0][0] = dim.clamp(floor, MID - 0.05);
+        self
     }
 
     /// Color at position p in 0..1 along the ramp.
@@ -187,6 +201,16 @@ mod tests {
                 "{seed:?}: background brighter than ramp"
             );
         }
+    }
+
+    #[test]
+    fn dim_lowers_the_dim_end_only_and_stays_above_bg() {
+        let p = Palette::new([232, 190, 124], None);
+        let d = Palette::new([232, 190, 124], None).with_dim(0.28);
+        assert!(lightness(d.at(0.0)) < lightness(p.at(0.0)) - 0.08);
+        assert_eq!(d.at(1.0), p.at(1.0));
+        let floor = Palette::new([232, 190, 124], None).with_dim(0.0);
+        assert!(lightness(floor.at(0.0)) > lightness(floor.bg));
     }
 
     #[test]

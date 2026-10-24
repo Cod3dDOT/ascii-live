@@ -1,7 +1,7 @@
 //! Command-line parsing (no dependencies; testable without a compositor).
 
 use crate::Config;
-use crate::color::{Palette, parse_hex};
+use crate::color::{DIM, Palette, parse_hex};
 use crate::field::Style;
 use crate::glyph;
 use crate::sim::Params;
@@ -22,6 +22,8 @@ Color:
   --color HEX       seed color (default #5ca9b7)
   --bg HEX          exact background (default: near-black tinted by the seed)
   --gamma F         color curve along the ramp (default 1.2)
+  --dim F           lightness of the dimmest glyphs, 0..1; lower lets clusters
+                    fade deeper into the background (default 0.40)
 
 Look:
   --ramp STR        glyph ramp, darkest first, from . - + | = : # o x
@@ -81,7 +83,7 @@ impl Default for Config {
 pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Cmd, String> {
     let mut cfg = Config::default();
     let (style, params) = (&mut cfg.style, &mut cfg.params);
-    let (mut seed_color, mut bg) = ([0x5c, 0xa9, 0xb7], None);
+    let (mut seed_color, mut bg, mut dim) = ([0x5c, 0xa9, 0xb7], None, DIM);
 
     let mut it = args.into_iter().peekable();
     while let Some(a) = it.next() {
@@ -99,6 +101,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Cmd, String> {
             "--span" => style.span = true,
             "--color" | "--fg" => seed_color = color(val()?)?,
             "--bg" => bg = Some(color(val()?)?),
+            "--dim" => dim = num(val()?)?,
             "--ramp" => {
                 style.ramp = val()?.chars().collect();
                 if !(2..=16).contains(&style.ramp.len()) {
@@ -137,7 +140,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Cmd, String> {
             _ => return Err(format!("unknown option {a}; see --help")),
         }
     }
-    style.palette = Palette::new(seed_color, bg);
+    style.palette = Palette::new(seed_color, bg).with_dim(dim);
     if !cfg.interactive {
         cfg.params.ambient_on = false;
     }
