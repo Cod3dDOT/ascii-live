@@ -55,6 +55,7 @@ use wayland_client::{
 
 use crate::{
     Config,
+    pacing::{Pacer, Present, RETRY},
     render::{Layout, Renderer},
     sim::Sim,
 };
@@ -62,20 +63,6 @@ use crate::{
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
 const BTN_MIDDLE: u32 = 0x112;
-/// Retry delay after a failed present (shm allocation, attach).
-const RETRY: Duration = Duration::from_secs(1);
-
-/// Outcome of [`App::present`].
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Present {
-    Committed,
-    /// Nothing changed (or no view).
-    Skipped,
-    /// Every buffer is held by the compositor.
-    Busy,
-    /// An shm error; already logged.
-    Failed,
-}
 
 /// Logs an shm error once per outage (until the next successful present).
 fn shm_failed(ok: &mut bool, what: &str, e: impl std::fmt::Display) -> Present {
@@ -106,10 +93,8 @@ struct Out {
     frac: Option<(WpFractionalScaleV1, WpViewport)>,
     size: (u32, u32),
     view: Option<View>,
-    frame_pending: bool,
+    pacer: Pacer,
     timer: Option<RegistrationToken>,
-    last: Instant,
-    idle: bool,
     cursor: Option<(f32, f32)>,
 }
 
@@ -225,7 +210,8 @@ impl App {
         // Nothing else retries a failed first frame: the output would stay
         // blank until pointer input.
         if self.present(i) == Present::Failed {
-            self.schedule_in(i, RETRY);
+            let wait = self.outs[i].pacer.retry();
+            self.arm(i, wait);
         }
     }
 
@@ -292,27 +278,17 @@ impl App {
             return Present::Committed;
         }
         surface.frame(&self.qh, surface.clone());
-        out.frame_pending = true;
+        out.pacer.frame_requested();
         out.layer.commit();
         Present::Committed
     }
 
-    /// Schedules the next tick: immediately when waking from idle, else at
-    /// the frame cap.
-    fn schedule(&mut self, i: usize) {
-        let out = &self.outs[i];
-        let wait = if out.idle {
-            Duration::ZERO
-        } else {
-            self.interval().saturating_sub(out.last.elapsed())
-        };
-        self.schedule_in(i, wait);
-    }
-
-    fn schedule_in(&mut self, i: usize, wait: Duration) {
+    /// Arms the tick timer the pacer asked for.
+    fn arm(&mut self, i: usize, wait: Option<Duration>) {
+        let Some(wait) = wait else { return };
         let out = &mut self.outs[i];
-        if out.frame_pending || out.timer.is_some() || out.view.is_none() {
-            return;
+        if out.view.is_none() {
+            return out.pacer.disarm();
         }
         let id = out.layer.wl_surface().id();
         let token = self
@@ -321,7 +297,10 @@ impl App {
                 app.on_timer(&id);
                 TimeoutAction::Drop
             });
-        out.timer = token.ok();
+        match token {
+            Ok(t) => out.timer = Some(t),
+            Err(_) => out.pacer.disarm(),
+        }
     }
 
     fn on_timer(&mut self, id: &ObjectId) {
@@ -337,35 +316,23 @@ impl App {
     }
 
     fn tick(&mut self, i: usize) {
-        let interval = self.interval().as_secs_f32();
         let out = &mut self.outs[i];
+        let dt = out.pacer.tick(Instant::now());
         let Some(view) = out.view.as_mut() else {
             return;
         };
-        let now = Instant::now();
-        let dt = if out.idle {
-            interval
-        } else {
-            (now - out.last).as_secs_f32().min(0.1)
-        };
-        out.last = now;
         view.sim.advance(dt);
         let active = view.sim.active();
-        out.idle = !active;
-        match self.present(i) {
-            // The frame callback schedules the next tick.
-            Present::Committed => {}
-            // Out of memory or similar: don't spin at the frame cap.
-            Present::Failed => self.schedule_in(i, RETRY),
-            // The screen is stale until a buffer frees up.
-            Present::Busy => self.schedule(i),
-            Present::Skipped if active => self.schedule(i),
-            Present::Skipped => {}
-        }
+        let present = self.present(i);
+        let wait = self.outs[i]
+            .pacer
+            .presented(present, active, Instant::now());
+        self.arm(i, wait);
     }
 
     fn wake(&mut self, i: usize) {
-        self.schedule(i);
+        let wait = self.outs[i].pacer.wake(Instant::now());
+        self.arm(i, wait);
     }
 
     /// Ambient flow is app-wide: it applies to every output and survives
@@ -463,10 +430,10 @@ impl CompositorHandler for App {
 
     fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, s: &wl_surface::WlSurface, _: u32) {
         let Some(i) = self.find(s) else { return };
-        self.outs[i].frame_pending = false;
-        if self.outs[i].view.as_ref().is_some_and(|v| v.sim.active()) {
-            self.schedule(i);
-        }
+        let out = &mut self.outs[i];
+        let active = out.view.as_ref().is_some_and(|v| v.sim.active());
+        let wait = out.pacer.on_frame(active, Instant::now());
+        self.arm(i, wait);
     }
 
     fn surface_enter(
@@ -538,10 +505,8 @@ impl OutputHandler for App {
             frac,
             size: (0, 0),
             view: None,
-            frame_pending: false,
+            pacer: Pacer::new(self.interval(), Instant::now()),
             timer: None,
-            last: Instant::now(),
-            idle: true,
             cursor: None,
         });
     }

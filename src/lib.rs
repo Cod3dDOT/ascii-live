@@ -10,6 +10,7 @@ pub mod color;
 pub mod field;
 pub mod glyph;
 pub mod instance;
+pub mod pacing;
 pub mod render;
 pub mod sim;
 pub mod workload;
