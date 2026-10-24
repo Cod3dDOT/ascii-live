@@ -18,7 +18,18 @@ pub mod workload;
 pub struct Config {
     pub style: field::Style,
     pub params: sim::Params,
+    /// Frame cap while animating; 0 = the output's refresh rate.
     pub fps: f32,
     /// false = `--static`: draw once, take no input, free everything.
     pub interactive: bool,
+}
+
+impl Config {
+    pub fn rate(&self) -> pacing::Rate {
+        if self.fps > 0.0 {
+            pacing::Rate::Fps(self.fps)
+        } else {
+            pacing::Rate::Display
+        }
+    }
 }

@@ -167,8 +167,12 @@ impl App {
         }
     }
 
-    fn interval(&self) -> Duration {
-        Duration::from_secs_f32(1.0 / self.cfg.fps.max(1.0))
+    /// Current refresh rate of `output` in mHz (0 = unknown).
+    fn refresh_mhz(&self, output: &wl_output::WlOutput) -> i32 {
+        self.output_state
+            .info(output)
+            .and_then(|i| i.modes.iter().find(|m| m.current).map(|m| m.refresh_rate))
+            .unwrap_or(0)
     }
 
     fn remove(&mut self, i: usize) {
@@ -493,6 +497,7 @@ impl OutputHandler for App {
             )
         });
         layer.commit();
+        let refresh = self.refresh_mhz(&output);
         let scale = f64::from(
             self.output_state
                 .info(&output)
@@ -505,13 +510,23 @@ impl OutputHandler for App {
             frac,
             size: (0, 0),
             view: None,
-            pacer: Pacer::new(self.interval(), Instant::now()),
+            pacer: Pacer::new(self.cfg.rate(), refresh, Instant::now()),
             timer: None,
             cursor: None,
         });
     }
 
-    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    fn update_output(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        output: wl_output::WlOutput,
+    ) {
+        let refresh = self.refresh_mhz(&output);
+        if let Some(out) = self.outs.iter_mut().find(|o| o.output == output) {
+            out.pacer.set_refresh(self.cfg.rate(), refresh);
+        }
+    }
 
     fn output_destroyed(
         &mut self,

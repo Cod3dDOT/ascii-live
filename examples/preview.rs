@@ -49,6 +49,8 @@ fn main() {
         Err(e) => die(&e),
     };
     let (w, h) = size;
+    // Offline: `--fps 0` (display rate) renders at 60.
+    let fps = 1.0 / cfg.rate().interval(0).as_secs_f32();
 
     if atlas {
         let r = Renderer::new(Layout::new(1, 1, 48), &cfg.style);
@@ -91,7 +93,7 @@ fn main() {
         let (mut sim_t, mut paint_t, mut damaged, mut rects) = (0.0, 0.0, 0usize, 0usize);
         let mut t_last = Instant::now();
         let mut f = 1;
-        let frames = workload::episode(&mut sim, cfg.fps, cols, rows, |sim, t| {
+        let frames = workload::episode(&mut sim, fps, cols, rows, |sim, t| {
             let t1 = Instant::now();
             sim_t += (t1 - t_last).as_secs_f64();
             r.sync(sim);
@@ -112,7 +114,7 @@ fn main() {
         eprintln!(
             "{cols}x{rows} cells: {frames} frames ({:.1}s); per frame: sim {:.3}ms, paint {:.3}ms, \
              damage {:.1}% of pixels in {:.0} rects",
-            n / f64::from(cfg.fps),
+            n / f64::from(fps),
             sim_t * 1e3 / n,
             paint_t * 1e3 / n,
             damaged as f64 * 100.0 / (n * (w * h) as f64),

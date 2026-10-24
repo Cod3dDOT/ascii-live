@@ -1,8 +1,10 @@
 //! Per-output frame pacing, free of Wayland so it can be tested with a fake
 //! clock. Ticks are capped to one per `interval` and gated on frame
 //! callbacks, so hidden outputs stop ticking; once the sim settles nothing
-//! is scheduled until input wakes it. Every method returns the timer the
-//! caller should arm, if any (`Some(wait)`); at most one is armed at a time.
+//! is scheduled until input wakes it. In [`Rate::Display`] mode every frame
+//! callback ticks right away and `interval` is the refresh period. Every
+//! method returns the timer the caller should arm, if any (`Some(wait)`);
+//! at most one is armed at a time.
 
 use std::time::{Duration, Instant};
 
@@ -24,9 +26,32 @@ pub enum Present {
     Failed,
 }
 
+/// How fast an animating output ticks.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Rate {
+    /// At most this many frames per second.
+    Fps(f32),
+    /// Once per display refresh, paced by frame callbacks.
+    Display,
+}
+
+impl Rate {
+    /// Tick interval on an output refreshing at `refresh_mhz` (0 = unknown).
+    pub fn interval(self, refresh_mhz: i32) -> Duration {
+        let hz = match self {
+            Rate::Fps(f) => f,
+            Rate::Display if refresh_mhz > 0 => refresh_mhz as f32 / 1000.0,
+            Rate::Display => 60.0,
+        };
+        Duration::from_secs_f32(1.0 / hz.max(1.0))
+    }
+}
+
 #[derive(Debug)]
 pub struct Pacer {
     interval: Duration,
+    /// [`Rate::Display`]: tick on every frame callback.
+    follow: bool,
     /// A frame callback is outstanding: the compositor will tell us when to
     /// draw next, and won't if the output is hidden.
     frame_pending: bool,
@@ -39,9 +64,10 @@ pub struct Pacer {
 }
 
 impl Pacer {
-    pub fn new(interval: Duration, now: Instant) -> Self {
+    pub fn new(rate: Rate, refresh_mhz: i32, now: Instant) -> Self {
         Pacer {
-            interval,
+            interval: rate.interval(refresh_mhz),
+            follow: rate == Rate::Display,
             frame_pending: false,
             timer: false,
             last: now,
@@ -51,6 +77,12 @@ impl Pacer {
 
     pub fn interval(&self) -> Duration {
         self.interval
+    }
+
+    /// The output's refresh rate changed.
+    pub fn set_refresh(&mut self, rate: Rate, refresh_mhz: i32) {
+        self.interval = rate.interval(refresh_mhz);
+        self.follow = rate == Rate::Display;
     }
 
     /// Input (or a setting change) wants a frame.
@@ -109,7 +141,13 @@ impl Pacer {
         if !active {
             return None;
         }
-        self.arm(self.wait(now))
+        // The compositor paces us: drawing now makes the next refresh.
+        let wait = if self.follow {
+            Duration::ZERO
+        } else {
+            self.wait(now)
+        };
+        self.arm(wait)
     }
 
     /// Next tick: right away when waking from rest, else at the cap.
@@ -143,7 +181,40 @@ mod tests {
 
     fn pacer() -> (Pacer, Instant) {
         let t0 = Instant::now();
-        (Pacer::new(FRAME, t0), t0)
+        (Pacer::new(Rate::Fps(50.0), 0, t0), t0)
+    }
+
+    #[test]
+    fn rate_intervals() {
+        let hz = |d: Duration| (1.0 / d.as_secs_f64()).round();
+        assert_eq!(hz(Rate::Fps(60.0).interval(165_001)), 60.0);
+        assert_eq!(hz(Rate::Display.interval(165_001)), 165.0);
+        assert_eq!(hz(Rate::Display.interval(0)), 60.0, "unknown refresh");
+    }
+
+    #[test]
+    fn display_rate_ticks_on_every_frame_callback() {
+        let t0 = Instant::now();
+        let mut p = Pacer::new(Rate::Display, 165_000, t0);
+        p.wake(t0);
+        p.tick(t0);
+        p.frame_requested();
+        p.presented(Present::Committed, true, t0);
+        assert_eq!(p.on_frame(true, t0 + MS), Some(Duration::ZERO));
+        // Without commits (invisible motion), tick at the refresh period.
+        p.tick(t0 + MS);
+        let wait = p.presented(Present::Skipped, true, t0 + MS).unwrap();
+        assert!((6000..6100).contains(&wait.as_micros()), "{wait:?}");
+    }
+
+    #[test]
+    fn refresh_change_updates_the_cap() {
+        let t0 = Instant::now();
+        let mut p = Pacer::new(Rate::Display, 165_000, t0);
+        p.set_refresh(Rate::Display, 60_000);
+        assert_eq!((1.0 / p.interval().as_secs_f64()).round(), 60.0);
+        p.set_refresh(Rate::Fps(30.0), 165_000);
+        assert_eq!((1.0 / p.interval().as_secs_f64()).round(), 30.0);
     }
 
     #[test]

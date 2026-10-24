@@ -33,7 +33,8 @@ Look:
   --seed N          noise seed (default 7)
 
 Motion:
-  --fps F           frame cap while animating (default 30)
+  --fps F           frame cap while animating; 0 = each display's refresh
+                    rate (default 60)
   --damping F       velocity decay /s (default 1.4)
   --relax S         seconds for glyphs to return home (default 1.4)
   --vorticity F     swirl strength (default 3)
@@ -67,7 +68,7 @@ impl Default for Config {
                 seed: 7,
             },
             params: Params::default(),
-            fps: 30.0,
+            fps: 60.0,
             interactive: true,
         }
     }
@@ -113,7 +114,10 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Cmd, String> {
             "--blank" => style.blank = num(val()?)?.clamp(0.0, 1.0),
             "--contrast" => style.contrast = num(val()?)?,
             "--seed" => style.seed = num(val()?)? as u32,
-            "--fps" => cfg.fps = num(val()?)?.clamp(1.0, 240.0),
+            "--fps" => {
+                let f = num(val()?)?;
+                cfg.fps = if f == 0.0 { 0.0 } else { f.clamp(1.0, 500.0) };
+            }
             "--damping" => params.damping = num(val()?)?,
             "--relax" => params.relax = num(val()?)?.max(0.05),
             "--vorticity" => params.vorticity = num(val()?)?,
@@ -138,6 +142,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Cmd, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pacing::Rate;
 
     fn run(args: &[&str]) -> Result<Config, String> {
         match parse(args.iter().map(ToString::to_string))? {
@@ -151,6 +156,14 @@ mod tests {
         let c = run(&[]).unwrap();
         assert_eq!(c.style.ramp, vec![' ', '.', '-', '+', 'o', 'x']);
         assert!(!c.params.ambient_on);
+        assert_eq!(c.rate(), Rate::Fps(60.0));
+    }
+
+    #[test]
+    fn fps_zero_follows_the_display() {
+        assert_eq!(run(&["--fps", "0"]).unwrap().rate(), Rate::Display);
+        assert_eq!(run(&["--fps", "0.2"]).unwrap().rate(), Rate::Fps(1.0));
+        assert_eq!(run(&["--fps", "165"]).unwrap().rate(), Rate::Fps(165.0));
     }
 
     #[test]
