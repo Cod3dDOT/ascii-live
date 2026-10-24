@@ -203,12 +203,17 @@ fn cases() -> Vec<Case> {
                 })
             }),
         ));
-        for (kind, paint) in [("sim", false), ("sim+paint", true)] {
+        for (kind, paint, glow) in [
+            ("sim", false, 0.0),
+            ("sim+paint", true, 0.0),
+            ("sim+paint+glow", true, 0.4),
+        ] {
             cases.push((
                 format!("frame/{kind}/{name}"),
                 "us/frame",
                 Box::new(move |b| {
-                    let c = cfg();
+                    let mut c = cfg();
+                    c.style.glow = glow;
                     measure(b, 1e6, |m| episode(m, &c, (w, h), paint))
                 }),
             ));

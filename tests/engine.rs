@@ -45,12 +45,14 @@ fn reference(cfg: &Config, sim: &mut Sim) -> Vec<u32> {
     px
 }
 
-/// At the default rate and at a high display rate (`--fps 0` on 165 Hz).
+/// At the default rate, a high display rate (`--fps 0` on 165 Hz), and with
+/// glow (whose incremental updates must also return exactly to rest).
 #[test]
 fn settles_to_exact_rest_image() {
-    for fps in [60.0, 165.0] {
+    for (fps, glow) in [(60.0, 0.0), (165.0, 0.0), (60.0, 0.6)] {
         let mut cfg = config();
         cfg.fps = fps;
+        cfg.style.glow = glow;
         let (mut sim, mut r) = setup(&cfg, Level::new());
         let (cols, rows) = (r.layout.cols, r.layout.rows);
         let s = r.add_buffer();
@@ -65,7 +67,10 @@ fn settles_to_exact_rest_image() {
             r.paint(sim.level(), s, bytes(&mut px), W * 4);
             stirred |= px != rest;
         });
-        eprintln!("{fps} fps: settled after {:.2}s", frames as f32 / fps);
+        eprintln!(
+            "{fps} fps, glow {glow}: settled after {:.2}s",
+            frames as f32 / fps
+        );
         assert!(stirred, "the workload should change the image");
         assert!(
             !sim.active(),
@@ -81,8 +86,15 @@ fn settles_to_exact_rest_image() {
 
 #[test]
 fn incremental_paint_matches_full_repaint_and_damage_covers_changes() {
-    let cfg = config();
-    let (mut sim, mut r) = setup(&cfg, Level::new());
+    for glow in [0.0, 0.6] {
+        let mut cfg = config();
+        cfg.style.glow = glow;
+        incremental_case(&cfg);
+    }
+}
+
+fn incremental_case(cfg: &Config) {
+    let (mut sim, mut r) = setup(cfg, Level::new());
     let (cols, rows) = (r.layout.cols, r.layout.rows);
     // Three buffers used round-robin, as when the compositor holds some.
     let mut bufs: Vec<(usize, Vec<u32>)> = (0..3)
@@ -107,15 +119,20 @@ fn incremental_paint_matches_full_repaint_and_damage_covers_changes() {
                     let covered = damage
                         .iter()
                         .any(|&(dx, dy, dw, dh)| x >= dx && x < dx + dw && y >= dy && y < dy + dh);
-                    assert!(covered, "frame {f}: pixel ({x},{y}) changed outside damage");
+                    assert!(
+                        covered,
+                        "glow {}: frame {f}: pixel ({x},{y}) changed outside damage",
+                        cfg.style.glow
+                    );
                 }
             }
         }
         shown = Some(px.clone());
         if f % 10 == 0 {
             assert!(
-                reference(&cfg, sim) == *px,
-                "frame {f}: incremental != full repaint"
+                reference(cfg, sim) == *px,
+                "glow {}: frame {f}: incremental != full repaint",
+                cfg.style.glow
             );
         }
         f += 1;

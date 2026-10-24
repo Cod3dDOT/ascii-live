@@ -28,12 +28,17 @@ pub(crate) fn to_lin(c: u8) -> f32 {
 
 // Linear sRGB -> sRGB.
 pub(crate) fn to_srgb(c: f32) -> u8 {
+    to_srgb_f32(c).round().clamp(0.0, 255.0) as u8
+}
+
+// Linear sRGB -> unrounded sRGB level (0..255).
+pub(crate) fn to_srgb_f32(c: f32) -> f32 {
     let c = if c <= 0.0031308 {
         c * 12.92
     } else {
         1.055 * c.max(0.0).powf(1.0 / 2.4) - 0.055
     };
-    (c * 255.0).round().clamp(0.0, 255.0) as u8
+    c * 255.0
 }
 
 fn oklch_of(rgb: [u8; 3]) -> [f32; 3] {

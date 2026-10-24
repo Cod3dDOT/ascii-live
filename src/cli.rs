@@ -24,6 +24,7 @@ Color:
   --gamma F         color curve along the ramp (default 1.2)
   --dim F           lightness of the dimmest glyphs, 0..1; lower lets clusters
                     fade deeper into the background (default 0.40)
+  --glow [F]        soft light behind glyph clusters (off; strength 0.4)
 
 Look:
   --ramp STR        glyph ramp, darkest first, from . - + | = : # o x
@@ -72,6 +73,7 @@ impl Default for Config {
                 contrast: 1.3,
                 seed: 7,
                 span: false,
+                glow: 0.0,
             },
             params: Params::default(),
             fps: 60.0,
@@ -131,6 +133,12 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Cmd, String> {
             "--vorticity" => params.vorticity = num(val()?)?,
             "--force" => params.force = num(val()?)?,
             "--radius" => params.radius = num(val()?)?.max(0.5),
+            "--glow" => {
+                style.glow = 0.4;
+                if let Some(v) = it.next_if(|v| v.parse::<f32>().is_ok()) {
+                    style.glow = v.parse::<f32>().unwrap().clamp(0.0, 4.0);
+                }
+            }
             "--ambient" => {
                 params.ambient_on = true;
                 if let Some(v) = it.next_if(|v| v.parse::<f32>().is_ok()) {
@@ -166,6 +174,9 @@ mod tests {
         assert!(!c.params.ambient_on);
         assert_eq!(c.rate(), Rate::Fps(60.0));
         assert!(!c.style.span);
+        assert_eq!(c.style.glow, 0.0);
+        assert_eq!(run(&["--glow"]).unwrap().style.glow, 0.4);
+        assert_eq!(run(&["--glow", "1"]).unwrap().style.glow, 1.0);
         assert!(run(&["--span"]).unwrap().style.span);
     }
 

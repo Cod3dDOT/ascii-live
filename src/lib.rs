@@ -8,6 +8,7 @@ pub mod app;
 pub mod cli;
 pub mod color;
 pub mod field;
+pub mod glow;
 pub mod glyph;
 pub mod instance;
 pub mod pacing;

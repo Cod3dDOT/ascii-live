@@ -11,6 +11,7 @@ use fearless_simd_macros::simd;
 
 use crate::color::{to_lin, to_srgb};
 use crate::field::Style;
+use crate::glow::{Glow, add_row};
 use crate::glyph::{mask, shape_at};
 use crate::sim::{Sim, TILE};
 
@@ -169,6 +170,10 @@ pub struct Renderer {
     /// Scratch for coarsening damage.
     merge_slot: Vec<u32>,
     any_damage: bool,
+    /// `--glow`: light behind clusters, or None when off (zero cost).
+    glow: Option<Glow>,
+    /// Scratch: cells whose glow changed during a sync.
+    stale: Vec<(usize, usize)>,
 }
 
 impl Renderer {
@@ -221,6 +226,22 @@ impl Renderer {
             *slot = s as f32;
         }
         atlas.shrink_to_fit();
+        let glow = (style.glow > 0.0).then(|| {
+            let lin: [f32; 256] = std::array::from_fn(|v| to_lin(v as u8));
+            let light = atlas
+                .chunks_exact(px)
+                .map(|s| {
+                    let mut acc = [0.0f32; 3];
+                    for &p in s {
+                        for (c, a) in acc.iter_mut().enumerate() {
+                            *a += lin[(p >> (16 - 8 * c) & 0xFF) as usize];
+                        }
+                    }
+                    acc.map(|a| a / px as f32)
+                })
+                .collect();
+            Glow::new(style.glow, bg8, light, layout.cols, layout.rows)
+        });
         let (tiles_x, tiles_y) = (layout.cols.div_ceil(TILE), layout.rows.div_ceil(TILE));
         let kw = tiles_x * TILE;
         Renderer {
@@ -239,6 +260,8 @@ impl Renderer {
             damaged: Vec::new(),
             merge_slot: Vec::new(),
             any_damage: false,
+            glow,
+            stale: Vec::new(),
         }
     }
 
@@ -276,7 +299,34 @@ impl Renderer {
     /// Re-quantizes tiles the sim touched; marks changes dirty + damaged.
     pub fn sync(&mut self, sim: &mut Sim) {
         let level = sim.level();
-        dispatch!(level, simd => sync_impl(simd, self, sim));
+        let changed = dispatch!(level, simd => sync_impl(simd, self, sim));
+        if let (Some(bbox), Some(glow)) = (changed, &mut self.glow) {
+            let mut stale = std::mem::take(&mut self.stale);
+            glow.update(&self.keys, self.kw, bbox, |i, j| stale.push((i, j)));
+            for &(i, j) in &stale {
+                self.invalidate(i, j);
+            }
+            stale.clear();
+            self.stale = stale;
+        }
+    }
+
+    /// Forces cell (i, j) to repaint in every buffer, with damage.
+    fn invalidate(&mut self, i: usize, j: usize) {
+        let c = j * self.kw + i;
+        let t = (j / TILE) * self.tiles_x + i / TILE;
+        for st in &mut self.states {
+            st.shown[c] = UNKNOWN;
+            st.dirty[t] = true;
+        }
+        let bi = (j / DBLK) * self.dbw + i / DBLK;
+        let d = &mut self.damage[bi];
+        if d[0] == NO_BOX[0] {
+            self.damaged.push(bi as u32);
+        }
+        let (i, j) = (i as u16, j as u16);
+        *d = [d[0].min(i), d[1].min(j), d[2].max(i + 1), d[3].max(j + 1)];
+        self.any_damage = true;
     }
 
     /// Brings buffer `state` up to date in `canvas` (XRGB8888, `stride` bytes).
@@ -352,13 +402,15 @@ impl Renderer {
     }
 }
 
+/// Returns the bounding box `[x0, y0, x1, y1)` of cells whose sprite changed.
 #[simd]
-fn sync_impl<S: Simd>(simd: S, r: &mut Renderer, sim: &mut Sim) {
+fn sync_impl<S: Simd>(simd: S, r: &mut Renderer, sim: &mut Sim) -> Option<[usize; 4]> {
     const { assert!(TILE.is_multiple_of(8)) };
     let (cols, rows, kw) = (r.layout.cols, r.layout.rows, r.kw);
     let zero = f32x8::splat(simd, 0.0);
     let lv = f32x8::splat(simd, LEVELS as f32);
     let maxk = f32x8::splat(simd, r.max_key);
+    let mut bbox = [usize::MAX, usize::MAX, 0, 0];
     for t in 0..sim.touched.len() {
         if !std::mem::take(&mut sim.touched[t]) {
             continue;
@@ -412,6 +464,12 @@ fn sync_impl<S: Simd>(simd: S, r: &mut Renderer, sim: &mut Sim) {
                     if lo >= hi {
                         continue; // padding cells only
                     }
+                    bbox = [
+                        bbox[0].min(lo),
+                        bbox[1].min(y),
+                        bbox[2].max(hi),
+                        bbox[3].max(y + 1),
+                    ];
                     let bi = (y / DBLK) * r.dbw + b0 / DBLK;
                     let d = &mut r.damage[bi];
                     if d[0] == NO_BOX[0] {
@@ -435,6 +493,7 @@ fn sync_impl<S: Simd>(simd: S, r: &mut Renderer, sim: &mut Sim) {
             }
         }
     }
+    (bbox[2] > bbox[0]).then_some(bbox)
 }
 
 /// Copies a short pixel row with inline 8-lane moves (last chunk overlaps,
@@ -480,12 +539,30 @@ fn paint_impl<S: Simd>(simd: S, r: &mut Renderer, state: usize, px: &mut [u32], 
                 let sx = (x0 as isize - (l.ox + (i * cs) as isize)) as usize;
                 let sy = (y0 as isize - (l.oy + (j * cs) as isize)) as usize;
                 let sprite = &r.atlas[k as usize * cs * cs..];
+                let glow = r.glow.as_ref().map(|g| g.cell(i, j));
                 for y in y0..y1 {
                     let s = (sy + y - y0) * cs + sx;
-                    copy_row(
-                        simd,
+                    let (dst, src) = (
                         &mut px[y * stride + x0..y * stride + x1],
                         &sprite[s..s + x1 - x0],
+                    );
+                    let Some([tl, tr, bl, br]) = glow else {
+                        copy_row(simd, dst, src);
+                        continue;
+                    };
+                    // Bilinear: edges at this row's height, then a ramp across.
+                    let fy = ((sy + y - y0) as f32 + 0.5) / cs as f32;
+                    let lerp = |a: [f32; 3], b: [f32; 3]| -> [f32; 3] {
+                        std::array::from_fn(|c| a[c] + (b[c] - a[c]) * fy)
+                    };
+                    add_row(
+                        simd,
+                        dst,
+                        src,
+                        lerp(tl, bl),
+                        lerp(tr, br),
+                        (sx, cs),
+                        (x0, y),
                     );
                 }
             }

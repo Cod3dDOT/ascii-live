@@ -28,6 +28,8 @@ pub struct Style {
     /// One field across all outputs, placed by their desktop layout, with
     /// one cell size (from the tallest output).
     pub span: bool,
+    /// Light behind glyph clusters, 0 = off (see [`crate::glow`]).
+    pub glow: f32,
 }
 
 impl Style {
@@ -206,6 +208,7 @@ mod tests {
             contrast: 1.3,
             seed: 7,
             span: false,
+            glow: 0.0,
         }
     }
 
