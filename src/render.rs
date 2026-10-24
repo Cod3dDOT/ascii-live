@@ -3,6 +3,9 @@
 //! re-quantized, each shm buffer tracks its own stale tiles, and damage is
 //! tight boxes per 4x4-cell block, merged 2x2 when over a cap.
 
+use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
+
 use fearless_simd::{dispatch, f32x8, prelude::*, u32x8};
 use fearless_simd_macros::simd;
 
@@ -141,13 +144,14 @@ const NO_BOX: [u16; 4] = [u16::MAX, u16::MAX, 0, 0];
 
 pub struct Renderer {
     pub layout: Layout,
-    /// `nkeys` sprites of `cell * cell` XRGB pixels, key = floor(v * LEVELS).
+    /// Unique sprites of `cell * cell` XRGB pixels, indexed by slot.
     atlas: Vec<u32>,
     max_key: f32,
-    /// Key -> first key with a pixel-identical sprite, so invisible changes
-    /// (blank band, tone steps that round to the same color) cost nothing.
+    /// Key (floor(v * LEVELS)) -> atlas slot of its sprite. Pixel-identical
+    /// sprites share a slot, so invisible changes (blank band, tone steps
+    /// that round to the same color) cost nothing and are stored once.
     canon: Vec<f32>,
-    /// Current key per cell, row stride `kw` (tile-padded).
+    /// Current atlas slot per cell, row stride `kw` (tile-padded).
     keys: Vec<f32>,
     kw: usize,
     tiles_x: usize,
@@ -171,12 +175,15 @@ impl Renderer {
         let nkeys = glyphs * LEVELS;
         let bg8 = style.palette.bg;
         let bg = bg8.map(f32::from);
-        let pack = |c: [f32; 3]| {
-            let c = c.map(|v| v.round().clamp(0.0, 255.0) as u32);
-            0xFF00_0000 | c[0] << 16 | c[1] << 8 | c[2]
-        };
-        let mut atlas = vec![pack(bg); nkeys * cs * cs];
-        for key in 0..nkeys {
+        let px = cs * cs;
+        // Unique sprites only; `canon` maps every key to its sprite's slot.
+        let mut atlas: Vec<u32> = Vec::new();
+        let mut slots_by_hash: HashMap<u64, Vec<u32>> = HashMap::new();
+        let mut canon = vec![0.0; nkeys];
+        let mut sprite = vec![0u32; px];
+        // Tone steps of one glyph share a shape: rasterize each shape once.
+        let (mut shape, mut m) = (None, Vec::new());
+        for (key, slot) in canon.iter_mut().enumerate() {
             let v = (key as f32 + 0.5) / LEVELS as f32;
             let (g, t) = shape_at(v, glyphs);
             let fg = if g == 0 {
@@ -186,22 +193,31 @@ impl Renderer {
             } else {
                 style.color(g, v - g as f32).map(f32::from)
             };
-            let lut = coverage_lut(bg8, fg.map(|v| v.round().clamp(0.0, 255.0) as u8));
-            let m = mask(&style.ramp, g, t, cs);
-            let sprite = &mut atlas[key * cs * cs..(key + 1) * cs * cs];
+            let lut = coverage_lut(bg8, fg.map(|v: f32| v.round().clamp(0.0, 255.0) as u8));
+            if shape != Some((g, t.to_bits())) {
+                (shape, m) = (Some((g, t.to_bits())), mask(&style.ramp, g, t, cs));
+            }
             for (p, &a) in sprite.iter_mut().zip(&m) {
                 *p = lut[usize::from(a)];
             }
-        }
-        let sprite = |k: usize| &atlas[k * cs * cs..(k + 1) * cs * cs];
-        let mut canon = vec![0.0; nkeys];
-        for k in 1..nkeys {
-            canon[k] = if sprite(k) == sprite(k - 1) {
-                canon[k - 1]
-            } else {
-                k as f32
+            let mut h = DefaultHasher::new();
+            sprite.hash(&mut h);
+            let same = slots_by_hash.entry(h.finish()).or_default();
+            let s = match same
+                .iter()
+                .find(|&&s| atlas[s as usize * px..(s as usize + 1) * px] == sprite[..])
+            {
+                Some(&s) => s,
+                None => {
+                    let s = (atlas.len() / px) as u32;
+                    atlas.extend_from_slice(&sprite);
+                    same.push(s);
+                    s
+                }
             };
+            *slot = s as f32;
         }
+        atlas.shrink_to_fit();
         let (tiles_x, tiles_y) = (layout.cols.div_ceil(TILE), layout.rows.div_ceil(TILE));
         let kw = tiles_x * TILE;
         Renderer {
@@ -225,13 +241,13 @@ impl Renderer {
     /// The whole atlas as an image: one row per glyph, LEVELS columns.
     pub fn atlas_image(&self) -> (usize, usize, Vec<u32>) {
         let cs = self.layout.cell;
-        let rows = self.atlas.len() / (cs * cs * LEVELS);
+        let rows = self.canon.len() / LEVELS;
         let (w, h) = (LEVELS * cs, rows * cs);
         let mut img = vec![0u32; w * h];
-        for key in 0..rows * LEVELS {
+        for (key, &slot) in self.canon.iter().enumerate() {
             let (gx, gy) = ((key % LEVELS) * cs, (key / LEVELS) * cs);
             for y in 0..cs {
-                let s = key * cs * cs + y * cs;
+                let s = slot as usize * cs * cs + y * cs;
                 img[(gy + y) * w + gx..(gy + y) * w + gx + cs]
                     .copy_from_slice(&self.atlas[s..s + cs]);
             }
