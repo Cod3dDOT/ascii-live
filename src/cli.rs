@@ -22,8 +22,8 @@ Color:
   --gamma F         color curve along the ramp (default 1.2)
 
 Look:
-  --ramp STR        glyph ramp, darkest first, from . - + | = : # o x and
-                    ' ' = blank (default ' .-+ox')
+  --ramp STR        glyph ramp, darkest first, from . - + | = : # o x
+                    / \\ ~ ^ * @ % and ' ' = blank (default ' .-+ox')
   --rows N          cell rows per screen height (default 54)
   --scale F         noise feature size in cells (default 14)
   --octaves N       noise octaves (default 4)

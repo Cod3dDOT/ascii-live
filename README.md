@@ -64,7 +64,8 @@ Motion:  --fps F  --damping F  --relax S  --vorticity F  --force F
 
 `situ --help` describes each option. `--rows` sets the cell size relative
 to the screen height, so the wallpaper looks the same on every monitor.
-`--ramp` takes glyphs from `. - + o x | = : #`, darkest first; a space is blank.
+`--ramp` takes glyphs from `. - + o x | = : # / \ ~ ^ * @ %`, darkest first; a
+space is blank.
 
 ## Development
 

@@ -15,16 +15,28 @@ fn sd_box(px: f32, py: f32, bx: f32, by: f32, r: f32) -> f32 {
     (ox * ox + oy * oy).sqrt() + qx.max(qy).min(0.0) - r
 }
 
+/// Distance to the segment `a`-`b`, minus `r`: a stroke with round caps.
+fn sd_seg(x: f32, y: f32, (ax, ay): (f32, f32), (bx, by): (f32, f32), r: f32) -> f32 {
+    let (px, py, dx, dy) = (x - ax, y - ay, bx - ax, by - ay);
+    let h = ((px * dx + py * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
+    (px - dx * h).hypot(py - dy * h) - r
+}
+
+fn sd_ring(x: f32, y: f32, radius: f32, half_width: f32) -> f32 {
+    (x.hypot(y) - radius).abs() - half_width
+}
+
 /// Characters with a shape, one per look (aliases aside), for messages.
-pub const SUPPORTED: &str = ". - + | = : # o x";
+pub const SUPPORTED: &str = ". - + | = : # o x / \\ ~ ^ * @ %";
 
 /// Whether `c` has a shape (see [`SUPPORTED`]); `' '` is the blank.
 pub fn supported(c: char) -> bool {
     shape(c, 0.0, 0.0).is_some()
 }
 
-/// Signed distance in cell units (cell is the unit square centered at 0),
-/// or `None` for a character without a shape.
+/// Signed distance in cell units (cell is the unit square centered at 0,
+/// y pointing down), or `None` for a character without a shape. Shapes
+/// stay within about 0.4 of the center so they never touch the cell edge.
 fn shape(glyph: char, x: f32, y: f32) -> Option<f32> {
     Some(match glyph {
         ' ' => f32::INFINITY,
@@ -35,12 +47,41 @@ fn shape(glyph: char, x: f32, y: f32) -> Option<f32> {
         ':' => ((x * x + (y - 0.17).powi(2)).sqrt() - 0.075)
             .min((x * x + (y + 0.17).powi(2)).sqrt() - 0.075),
         '#' | '█' => sd_box(x, y, 0.36, 0.36, 0.04),
-        'o' | 'O' | '0' => ((x * x + y * y).sqrt() - 0.297).abs() - 0.078,
-        'x' | 'X' | '*' => {
+        'o' | 'O' | '0' => sd_ring(x, y, 0.297, 0.078),
+        'x' | 'X' => {
             let s = std::f32::consts::FRAC_1_SQRT_2;
             let (u, v) = ((x + y) * s, (x - y) * s);
             sd_box(u, v, 0.49, 0.094, 0.0).min(sd_box(v, u, 0.49, 0.094, 0.0))
         }
+        '/' => sd_seg(x, y, (-0.24, 0.3), (0.24, -0.3), 0.09),
+        '\\' => sd_seg(x, y, (-0.24, -0.3), (0.24, 0.3), 0.09),
+        '^' => sd_seg(x, y, (-0.27, 0.12), (0.0, -0.2), 0.085).min(sd_seg(
+            x,
+            y,
+            (0.0, -0.2),
+            (0.27, 0.12),
+            0.085,
+        )),
+        '~' => {
+            // One sine period; distance to the curve is |y - f(x)| / |grad|.
+            let (a, k) = (0.09, std::f32::consts::TAU / 0.6);
+            let wave = (y - a * (k * x).sin()).abs() / (a * k * (k * x).cos()).hypot(1.0);
+            (wave - 0.08).max(x.abs() - 0.3)
+        }
+        '*' => (0..3)
+            .map(|i| {
+                let (s, c) = (std::f32::consts::FRAC_PI_3 * i as f32).sin_cos();
+                let (dx, dy) = (s * 0.3, -c * 0.3); // spoke pairs from vertical
+                sd_seg(x, y, (-dx, -dy), (dx, dy), 0.075)
+            })
+            .fold(f32::INFINITY, f32::min),
+        '@' => sd_ring(x, y, 0.33, 0.055)
+            .min(sd_ring(x, y, 0.12, 0.06))
+            .min(sd_seg(x, y, (0.12, -0.12), (0.12, 0.16), 0.06))
+            .min(sd_seg(x, y, (0.12, 0.16), (0.27, 0.19), 0.06)),
+        '%' => sd_seg(x, y, (-0.24, 0.3), (0.24, -0.3), 0.06)
+            .min((x + 0.2).hypot(y + 0.2) - 0.09)
+            .min((x - 0.2).hypot(y - 0.2) - 0.09),
         '.' => (x * x + y * y).sqrt() - 0.175,
         _ => return None,
     })
@@ -101,7 +142,9 @@ pub fn mask(ramp: &[char], g: usize, t: f32, cs: usize) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    const RAMP: [char; 11] = [' ', '.', '-', '+', 'o', 'x', '|', '=', ':', '#', '?'];
+    const RAMP: [char; 18] = [
+        ' ', '.', '-', '+', 'o', 'x', '|', '=', ':', '#', '/', '\\', '~', '^', '*', '@', '%', '?',
+    ];
 
     /// No glyph (or morph frame) may bleed into the neighbouring cell, or
     /// incremental cell blits would leave stale pixels behind.
@@ -131,11 +174,11 @@ mod tests {
 
     #[test]
     fn supported_glyphs() {
-        for c in SUPPORTED.split(' ').chain([" ", "O", "0", "X", "*", "█"]) {
+        for c in SUPPORTED.split(' ').chain([" ", "O", "0", "X", "█"]) {
             let c = c.chars().next().unwrap_or(' ');
             assert!(supported(c), "{c:?}");
         }
-        for c in ['?', 'a', '/', '\t'] {
+        for c in ['?', 'a', '&', '\t'] {
             assert!(!supported(c), "{c:?}");
         }
     }
