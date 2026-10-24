@@ -425,7 +425,8 @@ fn sync_impl<S: Simd>(simd: S, r: &mut Renderer, sim: &mut Sim) -> Option<[usize
     let zero = f32x8::splat(simd, 0.0);
     let lv = f32x8::splat(simd, LEVELS as f32);
     let maxk = f32x8::splat(simd, r.max_key);
-    let mut bbox = [usize::MAX, usize::MAX, 0, 0];
+    // Only the glow needs to know where sprites changed.
+    let (track, mut bbox) = (r.glow.is_some(), [usize::MAX, usize::MAX, 0, 0]);
     for t in 0..sim.touched.len() {
         if !std::mem::take(&mut sim.touched[t]) {
             continue;
@@ -479,12 +480,14 @@ fn sync_impl<S: Simd>(simd: S, r: &mut Renderer, sim: &mut Sim) -> Option<[usize
                     if lo >= hi {
                         continue; // padding cells only
                     }
-                    bbox = [
-                        bbox[0].min(lo),
-                        bbox[1].min(y),
-                        bbox[2].max(hi),
-                        bbox[3].max(y + 1),
-                    ];
+                    if track {
+                        bbox = [
+                            bbox[0].min(lo),
+                            bbox[1].min(y),
+                            bbox[2].max(hi),
+                            bbox[3].max(y + 1),
+                        ];
+                    }
                     let bi = (y / DBLK) * r.dbw + b0 / DBLK;
                     let d = &mut r.damage[bi];
                     if d[0] == NO_BOX[0] {
@@ -554,17 +557,19 @@ fn paint_impl<S: Simd>(simd: S, r: &mut Renderer, state: usize, px: &mut [u32], 
                 let sx = (x0 as isize - (l.ox + (i * cs) as isize)) as usize;
                 let sy = (y0 as isize - (l.oy + (j * cs) as isize)) as usize;
                 let sprite = &r.atlas[k as usize * cs * cs..];
-                let glow = r.glow.as_ref().map(|g| g.cell(i, j));
-                for y in y0..y1 {
-                    let s = (sy + y - y0) * cs + sx;
-                    let (dst, src) = (
-                        &mut px[y * stride + x0..y * stride + x1],
-                        &sprite[s..s + x1 - x0],
-                    );
-                    let Some([tl, tr, bl, br]) = glow else {
-                        copy_row(simd, dst, src);
-                        continue;
-                    };
+                let rows = y0..y1;
+                let row = |y: usize| y * stride + x0..y * stride + x1;
+                let src = |y: usize| (sy + y - y0) * cs + sx;
+                // Decided per cell, so without glow this is the plain copy loop.
+                let Some([tl, tr, bl, br]) = r.glow.as_ref().map(|g| g.cell(i, j)) else {
+                    for y in rows {
+                        let s = src(y);
+                        copy_row(simd, &mut px[row(y)], &sprite[s..s + x1 - x0]);
+                    }
+                    continue;
+                };
+                for y in rows {
+                    let s = src(y);
                     // Bilinear: edges at this row's height, then a ramp across.
                     let fy = ((sy + y - y0) as f32 + 0.5) / cs as f32;
                     let lerp = |a: [f32; 3], b: [f32; 3]| -> [f32; 3] {
@@ -572,8 +577,8 @@ fn paint_impl<S: Simd>(simd: S, r: &mut Renderer, state: usize, px: &mut [u32], 
                     };
                     add_row(
                         simd,
-                        dst,
-                        src,
+                        &mut px[row(y)],
+                        &sprite[s..s + x1 - x0],
                         lerp(tl, bl),
                         lerp(tr, br),
                         (sx, cs),
