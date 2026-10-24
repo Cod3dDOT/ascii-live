@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, Region},
     delegate_compositor, delegate_layer, delegate_output, delegate_pointer, delegate_registry,
-    delegate_seat, delegate_shm,
+    delegate_seat, delegate_shm, delegate_touch,
     output::{OutputHandler, OutputState},
     reexports::{
         calloop::{
@@ -33,6 +33,7 @@ use smithay_client_toolkit::{
         pointer::{
             PointerEvent, PointerEventKind, PointerHandler, cursor_shape::CursorShapeManager,
         },
+        touch::TouchHandler,
     },
     shell::{
         WaylandSurface,
@@ -50,7 +51,7 @@ use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle,
     backend::ObjectId,
     globals::registry_queue_init,
-    protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
+    protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_surface, wl_touch},
 };
 
 use crate::{
@@ -58,6 +59,7 @@ use crate::{
     pacing::{Pacer, Present, RETRY},
     render::{Layout, Renderer},
     sim::Sim,
+    touch::{Gesture, Touches},
 };
 
 const BTN_LEFT: u32 = 0x110;
@@ -114,6 +116,9 @@ pub struct App {
     fractional: Option<(WpFractionalScaleManagerV1, WpViewporter)>,
     cursor_device: Option<WpCursorShapeDeviceV1>,
     pointer: Option<wl_pointer::WlPointer>,
+    touch: Option<wl_touch::WlTouch>,
+    /// Touch points, keyed by the surface they went down on.
+    touches: Touches<ObjectId>,
     outs: Vec<Out>,
     cfg: Config,
     qh: QueueHandle<App>,
@@ -148,6 +153,8 @@ pub fn run(cfg: Config) -> Result<!, Box<dyn std::error::Error>> {
             .zip(globals.bind(&qh, 1..=1, ()).ok()),
         cursor_device: None,
         pointer: None,
+        touch: None,
+        touches: Touches::default(),
         outs: Vec::new(),
         cfg,
         qh,
@@ -337,6 +344,32 @@ impl App {
     fn wake(&mut self, i: usize) {
         let wait = self.outs[i].pacer.wake(Instant::now());
         self.arm(i, wait);
+    }
+
+    /// Surface-local position -> cells of output `i`.
+    fn to_cell(&self, i: usize, pos: (f64, f64)) -> Option<(f32, f32)> {
+        let out = &self.outs[i];
+        let s = out.scale;
+        let view = out.view.as_ref()?;
+        Some(view.renderer.layout.to_cell(pos.0 * s, pos.1 * s))
+    }
+
+    fn find_id(&self, id: &ObjectId) -> Option<usize> {
+        self.outs
+            .iter()
+            .position(|o| &o.layer.wl_surface().id() == id)
+    }
+
+    fn touch_gesture(&mut self, (key, g): (ObjectId, Gesture)) {
+        let Some(i) = self.find_id(&key) else { return };
+        let Some(view) = self.outs[i].view.as_mut() else {
+            return;
+        };
+        match g {
+            Gesture::Push(x0, y0, x1, y1) => view.sim.push(x0, y0, x1, y1),
+            Gesture::Tap(x, y) => view.sim.burst(x, y, 40.0),
+        }
+        self.wake(i);
     }
 
     /// Ambient flow is app-wide: it applies to every output and survives
@@ -591,6 +624,9 @@ impl SeatHandler for App {
                 .map(|m| m.get_shape_device(&pointer, qh));
             self.pointer = Some(pointer);
         }
+        if cap == Capability::Touch && self.touch.is_none() && self.cfg.interactive {
+            self.touch = self.seat_state.get_touch(qh, &seat).ok();
+        }
     }
 
     fn remove_capability(
@@ -606,6 +642,12 @@ impl SeatHandler for App {
             }
             if let Some(p) = self.pointer.take() {
                 p.release();
+            }
+        }
+        if cap == Capability::Touch {
+            self.touches.cancel();
+            if let Some(t) = self.touch.take() {
+                t.release();
             }
         }
     }
@@ -626,6 +668,85 @@ impl PointerHandler for App {
                 self.pointer_event(i, ev);
             }
         }
+    }
+}
+
+impl TouchHandler for App {
+    fn down(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_touch::WlTouch,
+        _: u32,
+        time: u32,
+        surface: wl_surface::WlSurface,
+        id: i32,
+        position: (f64, f64),
+    ) {
+        if let Some(i) = self.find(&surface)
+            && let Some(pos) = self.to_cell(i, position)
+        {
+            self.touches.down(id, surface.id(), pos, time);
+        }
+    }
+
+    fn up(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_touch::WlTouch,
+        _: u32,
+        time: u32,
+        id: i32,
+    ) {
+        if let Some(g) = self.touches.up(id, time) {
+            self.touch_gesture(g);
+        }
+    }
+
+    fn motion(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_touch::WlTouch,
+        _: u32,
+        id: i32,
+        position: (f64, f64),
+    ) {
+        // Positions are local to the surface the point went down on.
+        let Some(i) = self.touches.key(id).and_then(|k| self.find_id(k)) else {
+            return;
+        };
+        if let Some(pos) = self.to_cell(i, position)
+            && let Some(g) = self.touches.motion(id, pos)
+        {
+            self.touch_gesture(g);
+        }
+    }
+
+    fn shape(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_touch::WlTouch,
+        _: i32,
+        _: f64,
+        _: f64,
+    ) {
+    }
+
+    fn orientation(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_touch::WlTouch,
+        _: i32,
+        _: f64,
+    ) {
+    }
+
+    fn cancel(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_touch::WlTouch) {
+        self.touches.cancel();
     }
 }
 
@@ -678,6 +799,7 @@ delegate_output!(App);
 delegate_shm!(App);
 delegate_seat!(App);
 delegate_pointer!(App);
+delegate_touch!(App);
 delegate_layer!(App);
 delegate_registry!(App);
 

@@ -13,6 +13,7 @@ pub mod instance;
 pub mod pacing;
 pub mod render;
 pub mod sim;
+pub mod touch;
 pub mod workload;
 
 pub struct Config {

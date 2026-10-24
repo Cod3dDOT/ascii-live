@@ -44,6 +44,7 @@ Motion:
 
 Mouse: move = push fluid, left/right click = burst/implode,
        scroll = swirl, middle click = toggle ambient flow.
+Touch: drag = push fluid, tap = burst.
 ";
 
 pub enum Cmd {

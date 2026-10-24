@@ -49,6 +49,7 @@ and takes no input.
 | left / right click | burst / implode |
 | scroll | swirl |
 | middle click | toggle continuous ambient flow |
+| touch: drag / tap | push the fluid / burst |
 
 ### Options
 
