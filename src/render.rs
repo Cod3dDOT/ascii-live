@@ -6,6 +6,7 @@
 use fearless_simd::{dispatch, f32x8, prelude::*, u32x8};
 use fearless_simd_macros::simd;
 
+use crate::color::{to_lin, to_srgb};
 use crate::field::Style;
 use crate::glyph::{mask, shape_at};
 use crate::sim::{Sim, TILE};
@@ -109,6 +110,26 @@ impl Layout {
     }
 }
 
+fn pack_rgb(c: [u8; 3]) -> u32 {
+    0xFF00_0000 | u32::from(c[0]) << 16 | u32::from(c[1]) << 8 | u32::from(c[2])
+}
+
+/// Pixel for each coverage 0..=255 of `fg` over `bg`, mixed in linear light:
+/// a partly covered pixel emits that fraction of the glyph's light, so edges
+/// keep the stroke's weight instead of darkening (as an sRGB mix does). The
+/// ends are exact, so uncovered pixels equal the background bit for bit.
+fn coverage_lut(bg: [u8; 3], fg: [u8; 3]) -> [u32; 256] {
+    let (bl, fl) = (bg.map(to_lin), fg.map(to_lin));
+    let mut lut: [u32; 256] = std::array::from_fn(|a| {
+        let a = a as f32 / 255.0;
+        pack_rgb(std::array::from_fn(|k| {
+            to_srgb(bl[k] + (fl[k] - bl[k]) * a)
+        }))
+    });
+    (lut[0], lut[255]) = (pack_rgb(bg), pack_rgb(fg));
+    lut
+}
+
 /// Per-shm-buffer bookkeeping.
 struct BufState {
     shown: Vec<f32>,
@@ -148,7 +169,8 @@ impl Renderer {
         let glyphs = style.glyphs();
         let cs = layout.cell;
         let nkeys = glyphs * LEVELS;
-        let bg = style.palette.bg.map(f32::from);
+        let bg8 = style.palette.bg;
+        let bg = bg8.map(f32::from);
         let pack = |c: [f32; 3]| {
             let c = c.map(|v| v.round().clamp(0.0, 255.0) as u32);
             0xFF00_0000 | c[0] << 16 | c[1] << 8 | c[2]
@@ -164,11 +186,11 @@ impl Renderer {
             } else {
                 style.color(g, v - g as f32).map(f32::from)
             };
+            let lut = coverage_lut(bg8, fg.map(|v| v.round().clamp(0.0, 255.0) as u8));
             let m = mask(&style.ramp, g, t, cs);
             let sprite = &mut atlas[key * cs * cs..(key + 1) * cs * cs];
             for (p, &a) in sprite.iter_mut().zip(&m) {
-                let a = f32::from(a) / 255.0;
-                *p = pack(std::array::from_fn(|k| bg[k] + (fg[k] - bg[k]) * a));
+                *p = lut[usize::from(a)];
             }
         }
         let sprite = |k: usize| &atlas[k * cs * cs..(k + 1) * cs * cs];
@@ -455,6 +477,20 @@ mod tests {
     /// Logical x of the left edge of global column `g` as `l` draws it.
     fn left_edge(l: &Layout, origin: i32, pos: i32, scale: f64, g: i32) -> f64 {
         f64::from(pos) + (l.ox + (g - origin) as isize * l.cell as isize) as f64 / scale
+    }
+
+    #[test]
+    fn coverage_mixes_in_linear_light() {
+        let (bg, fg) = ([4, 3, 2], [232, 190, 124]);
+        let lut = coverage_lut(bg, fg);
+        assert_eq!((lut[0], lut[255]), (pack_rgb(bg), pack_rgb(fg)));
+        // Half coverage emits half the light: ~73% of the sRGB value, not 50%.
+        let r = (lut[128] >> 16) & 0xFF;
+        assert!((165..=175).contains(&r), "{r}");
+        assert!(
+            lut.windows(2)
+                .all(|w| (w[1] >> 16 & 0xFF) >= (w[0] >> 16 & 0xFF))
+        );
     }
 
     #[test]

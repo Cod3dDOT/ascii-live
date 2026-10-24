@@ -17,7 +17,7 @@ pub struct Palette {
 }
 
 // sRGB -> linear RGB.
-fn to_lin(c: u8) -> f32 {
+pub(crate) fn to_lin(c: u8) -> f32 {
     let c = f32::from(c) / 255.0;
     if c <= 0.04045 {
         c / 12.92
@@ -27,7 +27,7 @@ fn to_lin(c: u8) -> f32 {
 }
 
 // Linear sRGB -> sRGB.
-fn to_srgb(c: f32) -> u8 {
+pub(crate) fn to_srgb(c: f32) -> u8 {
     let c = if c <= 0.0031308 {
         c * 12.92
     } else {
