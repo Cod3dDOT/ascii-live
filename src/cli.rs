@@ -15,6 +15,8 @@ Starting a new instance replaces the one already running on this display.
 
   --static          draw once and take no input: no animation, no wakeups,
                     minimal memory (motion options are ignored)
+  --span            one continuous field across all monitors, placed by the
+                    desktop layout; cells are sized by the tallest monitor
 
 Color:
   --color HEX       seed color (default #5ca9b7)
@@ -67,6 +69,7 @@ impl Default for Config {
                 blank: 0.45,
                 contrast: 1.3,
                 seed: 7,
+                span: false,
             },
             params: Params::default(),
             fps: 60.0,
@@ -93,6 +96,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Cmd, String> {
         match a.as_str() {
             "-h" | "--help" => return Ok(Cmd::Help),
             "--static" => cfg.interactive = false,
+            "--span" => style.span = true,
             "--color" | "--fg" => seed_color = color(val()?)?,
             "--bg" => bg = Some(color(val()?)?),
             "--ramp" => {
@@ -158,6 +162,8 @@ mod tests {
         assert_eq!(c.style.ramp, vec![' ', '.', '-', '+', 'o', 'x']);
         assert!(!c.params.ambient_on);
         assert_eq!(c.rate(), Rate::Fps(60.0));
+        assert!(!c.style.span);
+        assert!(run(&["--span"]).unwrap().style.span);
     }
 
     #[test]

@@ -49,6 +49,44 @@ impl Layout {
         }
     }
 
+    /// One output's window onto a desktop-wide grid of `lcell`-logical-pixel
+    /// cells anchored at the logical origin (`--span`). `pos` is the output's
+    /// logical position and `scale` its buffer pixels per logical pixel.
+    /// Returns the layout and the global index of its first cell.
+    pub fn spanned(
+        width: usize,
+        height: usize,
+        scale: f64,
+        lcell: f64,
+        pos: (i32, i32),
+    ) -> (Self, (i32, i32)) {
+        let cell = ((lcell * scale).round() as usize).max(4);
+        // This output's logical cell after rounding to whole pixels.
+        let lc = cell as f64 / scale;
+        let axis = |p: i32, len: usize| {
+            let g = (f64::from(p) / lc).floor();
+            let off =
+                (-((f64::from(p) - g * lc) * scale).round() as isize).clamp(1 - cell as isize, 0);
+            (
+                g as i32,
+                off,
+                ((len as isize - off) as usize).div_ceil(cell),
+            )
+        };
+        let (gx, ox, cols) = axis(pos.0, width);
+        let (gy, oy, rows) = axis(pos.1, height);
+        let layout = Layout {
+            width,
+            height,
+            cell,
+            cols,
+            rows,
+            ox,
+            oy,
+        };
+        (layout, (gx, gy))
+    }
+
     /// Visible pixel rect of cell (i, j), clipped to the buffer.
     #[inline]
     fn cell_rect(&self, i: usize, j: usize) -> (usize, usize, usize, usize) {
@@ -406,6 +444,54 @@ fn paint_impl<S: Simd>(simd: S, r: &mut Renderer, state: usize, px: &mut [u32], 
                     );
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Logical x of the left edge of global column `g` as `l` draws it.
+    fn left_edge(l: &Layout, origin: i32, pos: i32, scale: f64, g: i32) -> f64 {
+        f64::from(pos) + (l.ox + (g - origin) as isize * l.cell as isize) as f64 / scale
+    }
+
+    #[test]
+    fn spanned_grid_continues_across_outputs() {
+        // eDP-1 2560x1600 @2 at (0,0) and DP-9 1920x1080 @1 at (1280,0);
+        // cells sized by the taller output (1080 logical px / 52 rows).
+        let lcell = 1080.0 / 52.0;
+        let (a, ga) = Layout::spanned(2560, 1600, 2.0, lcell, (0, 0));
+        let (b, gb) = Layout::spanned(1920, 1080, 1.0, lcell, (1280, 0));
+        assert_eq!(ga, (0, 0));
+        assert_eq!((a.ox, a.oy), (0, 0));
+        // Same logical cell size on both despite the different scales.
+        assert_eq!(a.cell as f64 / 2.0, b.cell as f64);
+        // The column cut by the seam starts at the same desktop x on both.
+        let seam = gb.0;
+        assert!(seam > 0 && b.ox < 0, "seam column straddles the edge");
+        let (xa, xb) = (
+            left_edge(&a, ga.0, 0, 2.0, seam),
+            left_edge(&b, gb.0, 1280, 1.0, seam),
+        );
+        assert!((xa - xb).abs() < 0.5, "{xa} vs {xb}");
+        // And a desktop point maps to the same global cell on both sides.
+        let ca = a.to_cell((1279.9 - 0.0) * 2.0, 0.0).0 + ga.0 as f32;
+        let cb = b.to_cell(-0.1, 0.0).0 + gb.0 as f32;
+        assert_eq!(ca.floor(), cb.floor());
+    }
+
+    #[test]
+    fn spanned_layout_covers_the_buffer() {
+        for (pos, scale) in [((0, 0), 1.0), ((1280, 37), 1.5), ((-900, -5), 2.0)] {
+            let (l, _) = Layout::spanned(1000, 700, scale, 19.3, pos);
+            assert!(l.ox <= 0 && l.ox > -(l.cell as isize), "{pos:?}");
+            assert!(l.oy <= 0 && l.oy > -(l.cell as isize), "{pos:?}");
+            assert!(l.ox + (l.cols * l.cell) as isize >= 1000);
+            assert!(l.oy + (l.rows * l.cell) as isize >= 700);
+            let last_col = ((l.cols - 1) * l.cell) as isize;
+            assert!(l.ox + last_col < 1000, "no empty column");
         }
     }
 }

@@ -94,6 +94,8 @@ struct Out {
     /// Present when the compositor supports fractional scaling.
     frac: Option<(WpFractionalScaleV1, WpViewport)>,
     size: (u32, u32),
+    /// Logical position on the desktop the view was built for (`--span`).
+    pos: (i32, i32),
     view: Option<View>,
     pacer: Pacer,
     timer: Option<RegistrationToken>,
@@ -183,6 +185,7 @@ impl App {
     }
 
     fn remove(&mut self, i: usize) {
+        let cell = self.span_cell();
         let out = self.outs.remove(i);
         if let Some(t) = out.timer {
             self.handle.remove(t);
@@ -191,6 +194,41 @@ impl App {
             f.destroy();
             v.destroy();
         }
+        self.rebuild_if_span_cell_changed(cell);
+    }
+
+    /// `--span` cell edge in logical pixels: `--rows` per height of the
+    /// tallest configured output. None without `--span` or outputs.
+    fn span_cell(&self) -> Option<f64> {
+        let tallest = self
+            .outs
+            .iter()
+            .map(|o| o.size.1)
+            .max()
+            .filter(|&h| h > 0)?;
+        self.cfg
+            .style
+            .span
+            .then(|| f64::from(tallest) / f64::from(self.cfg.style.rows.max(1.0)))
+    }
+
+    /// Outputs share the span cell size, so a change redraws all of them.
+    /// Returns whether it did.
+    fn rebuild_if_span_cell_changed(&mut self, before: Option<f64>) -> bool {
+        if self.span_cell() == before {
+            return false;
+        }
+        for i in 0..self.outs.len() {
+            self.rebuild(i);
+        }
+        true
+    }
+
+    fn logical_position(&self, output: &wl_output::WlOutput) -> (i32, i32) {
+        self.output_state
+            .info(output)
+            .and_then(|i| i.logical_position)
+            .unwrap_or((0, 0))
     }
 
     fn find(&self, surface: &wl_surface::WlSurface) -> Option<usize> {
@@ -200,14 +238,28 @@ impl App {
     }
 
     fn rebuild(&mut self, i: usize) {
+        let span = self.span_cell();
+        let pos = self.logical_position(&self.outs[i].output);
         let out = &mut self.outs[i];
         let px = |v: u32| (f64::from(v) * out.scale).round() as usize;
         let (w, h) = (px(out.size.0), px(out.size.1));
         if w == 0 || h == 0 {
             return;
         }
-        let layout = Layout::new(w, h, self.cfg.style.cell_px(h));
-        let rest = self.cfg.style.generate(layout.cols, layout.rows);
+        let style = &self.cfg.style;
+        let (layout, rest) = match span {
+            Some(lcell) => {
+                out.pos = pos;
+                let (layout, origin) = Layout::spanned(w, h, out.scale, lcell, pos);
+                let rest = style.generate_spanned(origin, layout.cols, layout.rows);
+                (layout, rest)
+            }
+            None => {
+                let layout = Layout::new(w, h, style.cell_px(h));
+                let rest = style.generate(layout.cols, layout.rows);
+                (layout, rest)
+            }
+        };
         let sim = Sim::new(layout.cols, layout.rows, rest, self.cfg.params.clone());
         out.view = Some(View {
             renderer: Renderer::new(layout, &self.cfg.style),
@@ -542,6 +594,7 @@ impl OutputHandler for App {
             scale,
             frac,
             size: (0, 0),
+            pos: (0, 0),
             view: None,
             pacer: Pacer::new(self.cfg.rate(), refresh, Instant::now()),
             timer: None,
@@ -556,8 +609,14 @@ impl OutputHandler for App {
         output: wl_output::WlOutput,
     ) {
         let refresh = self.refresh_mhz(&output);
-        if let Some(out) = self.outs.iter_mut().find(|o| o.output == output) {
-            out.pacer.set_refresh(self.cfg.rate(), refresh);
+        let pos = self.logical_position(&output);
+        let Some(i) = self.outs.iter().position(|o| o.output == output) else {
+            return;
+        };
+        self.outs[i].pacer.set_refresh(self.cfg.rate(), refresh);
+        // The output moved within the desktop layout.
+        if self.cfg.style.span && self.outs[i].pos != pos {
+            self.rebuild(i);
         }
     }
 
@@ -594,8 +653,11 @@ impl LayerShellHandler for App {
         // Static outputs drop their view after drawing; only redraw on resize.
         let first = self.outs[i].view.is_none() && self.cfg.interactive;
         if self.outs[i].size != c.new_size || first {
+            let cell = self.span_cell();
             self.outs[i].size = c.new_size;
-            self.rebuild(i);
+            if !self.rebuild_if_span_cell_changed(cell) {
+                self.rebuild(i);
+            }
         }
     }
 }

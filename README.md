@@ -41,7 +41,8 @@ spawn-at-startup "situ" "--color" "5ca9b7" # niri
 
 Starting it again replaces the running instance, so you can tweak flags live
 from a terminal. Prefer a still wallpaper? `--static` draws the same art once
-and takes no input.
+and takes no input. Several monitors? `--span` lays one continuous field
+across them, following your output layout.
 
 | Input | Effect |
 |---|---|
@@ -54,7 +55,7 @@ and takes no input.
 ### Options
 
 ```
-Mode:    --static
+Mode:    --static  --span
 Color:   --color HEX  --bg HEX  --gamma F
 Look:    --ramp STR  --rows N  --scale F  --octaves N  --warp F
          --blank F  --contrast F  --seed N

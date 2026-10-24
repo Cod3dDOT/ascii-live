@@ -25,6 +25,9 @@ pub struct Style {
     /// Contrast of the field before quantization.
     pub contrast: f32,
     pub seed: u32,
+    /// One field across all outputs, placed by their desktop layout, with
+    /// one cell size (from the tallest output).
+    pub span: bool,
 }
 
 impl Style {
@@ -46,12 +49,29 @@ impl Style {
 
     /// Rest field for a `cols` x `rows` cell grid.
     pub fn generate(&self, cols: usize, rows: usize) -> Vec<f32> {
+        let mut raw = self.raw((0, 0), cols, rows);
+        let levels = self.levels(&raw);
+        self.quantize(&mut raw, levels);
+        raw
+    }
+
+    /// Rest field for a `cols` x `rows` window whose first cell is cell
+    /// `origin` of one desktop-wide grid. Levels come from a fixed sample of
+    /// that grid, so adjacent windows join seamlessly.
+    pub fn generate_spanned(&self, origin: (i32, i32), cols: usize, rows: usize) -> Vec<f32> {
+        let levels = self.levels(&self.raw((0, 0), SPAN_SAMPLE.0, SPAN_SAMPLE.1));
+        let mut raw = self.raw(origin, cols, rows);
+        self.quantize(&mut raw, levels);
+        raw
+    }
+
+    /// Unquantized fBm over a window of the cell grid.
+    fn raw(&self, (gx, gy): (i32, i32), cols: usize, rows: usize) -> Vec<f32> {
         let s = 1.0 / self.scale.max(0.5);
-        let n = self.glyphs() as f32;
-        let mut raw: Vec<f32> = (0..rows * cols)
+        (0..rows * cols)
             .map(|i| {
-                let x = (i % cols) as f32 * s;
-                let y = (i / cols) as f32 * s;
+                let x = (gx as f32 + (i % cols) as f32) * s;
+                let y = (gy as f32 + (i / cols) as f32) * s;
                 let (wx, wy) = if self.warp > 0.0 {
                     (
                         fbm(self.seed ^ 0x51, x + 1.7, y + 9.2, 3),
@@ -67,16 +87,23 @@ impl Style {
                     self.octaves,
                 )
             })
-            .collect();
+            .collect()
+    }
 
-        // Map by rank so `blank` is an exact coverage fraction independent of
-        // the noise distribution; then apply contrast to the lit part.
-        let mut sorted = raw.clone();
+    /// (blank threshold, bright end) of `raw`, by rank, so `blank` is an
+    /// exact coverage fraction independent of the noise distribution.
+    fn levels(&self, raw: &[f32]) -> (f32, f32) {
+        let mut sorted = raw.to_vec();
         sorted.sort_unstable_by(f32::total_cmp);
         let q = |f: f32| sorted[((sorted.len() - 1) as f32 * f.clamp(0.0, 1.0)) as usize];
         let lo = q(self.blank);
-        let hi = q(0.995).max(lo + 1e-6);
-        for v in &mut raw {
+        (lo, q(0.995).max(lo + 1e-6))
+    }
+
+    /// Maps raw noise onto the ramp: blank below `lo`, contrast on the rest.
+    fn quantize(&self, raw: &mut [f32], (lo, hi): (f32, f32)) {
+        let n = self.glyphs() as f32;
+        for v in raw {
             if *v <= lo {
                 *v = 0.0;
                 continue;
@@ -92,9 +119,12 @@ impl Style {
                 x
             };
         }
-        raw
     }
 }
+
+/// Cells sampled for `--span` levels: a fixed window, so every output
+/// agrees (fBm is stationary, so any large window is representative).
+const SPAN_SAMPLE: (usize, usize) = (256, 144);
 
 #[inline]
 fn hash(seed: u32, x: i32, y: i32) -> u32 {
@@ -175,6 +205,7 @@ mod tests {
             blank,
             contrast: 1.3,
             seed: 7,
+            span: false,
         }
     }
 
@@ -203,6 +234,23 @@ mod tests {
         assert_eq!(s.cell_px(1080), 20);
         assert_eq!(s.cell_px(2160), 40);
         assert_eq!(s.cell_px(10), 4);
+    }
+
+    #[test]
+    fn spanned_windows_join_seamlessly() {
+        let s = style(0.45);
+        let whole = s.generate_spanned((-10, 5), 50, 20);
+        let right = s.generate_spanned((15, 5), 25, 20);
+        for y in 0..20 {
+            assert_eq!(whole[y * 50 + 25..y * 50 + 50], right[y * 25..y * 25 + 25]);
+        }
+    }
+
+    #[test]
+    fn spanned_levels_match_the_requested_coverage() {
+        let f = style(0.45).generate_spanned((300, -40), 200, 100);
+        let zeros = f.iter().filter(|&&v| v == 0.0).count() as f32 / f.len() as f32;
+        assert!((zeros - 0.45).abs() < 0.08, "{zeros}");
     }
 
     #[test]
