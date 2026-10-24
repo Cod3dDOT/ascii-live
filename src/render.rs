@@ -153,6 +153,9 @@ pub struct Renderer {
     canon: Vec<f32>,
     /// Current atlas slot per cell, row stride `kw` (tile-padded).
     keys: Vec<f32>,
+    /// Raw key per cell (same layout): the sync fast path compares against
+    /// this, since slots rarely equal keys.
+    raw: Vec<f32>,
     kw: usize,
     tiles_x: usize,
     tiles_y: usize,
@@ -226,6 +229,7 @@ impl Renderer {
             max_key: (nkeys - 1) as f32,
             canon,
             keys: vec![UNKNOWN; kw * tiles_y * TILE],
+            raw: vec![UNKNOWN; kw * tiles_y * TILE],
             kw,
             tiles_x,
             tiles_y,
@@ -367,16 +371,19 @@ fn sync_impl<S: Simd>(simd: S, r: &mut Renderer, sim: &mut Sim) {
         let mut changed = false;
         for y in ty * TILE..((ty + 1) * TILE).min(rows) {
             let src = &sim.dye_row(y)[x0..x0 + TILE];
-            let dst = &mut r.keys[y * kw + x0..y * kw + x0 + TILE];
+            let row = y * kw + x0..y * kw + x0 + TILE;
+            let (dst, raw) = (&mut r.keys[row.clone()], &mut r.raw[row]);
             for x in (0..TILE).step_by(8) {
                 // key = floor(v * LEVELS) = glyph * LEVELS + step (tone/morph).
                 let v = f32x8::from_slice(simd, &src[x..x + 8]);
                 let k = (v * lv).floor().max(zero).min(maxk);
-                let old = f32x8::from_slice(simd, &dst[x..x + 8]);
+                let old = f32x8::from_slice(simd, &raw[x..x + 8]);
                 if !k.simd_ne(old).any_true() {
                     continue;
                 }
-                // Rare path (cells changed): canonicalize changed lanes only.
+                k.store_slice(&mut raw[x..x + 8]);
+                // Rare path (keys changed): map changed lanes to atlas slots;
+                // only a different sprite is a visible change.
                 let mut kk = [0.0; 8];
                 k.store_slice(&mut kk);
                 let mut bits = 0u32;
