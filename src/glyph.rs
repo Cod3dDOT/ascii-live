@@ -15,10 +15,18 @@ fn sd_box(px: f32, py: f32, bx: f32, by: f32, r: f32) -> f32 {
     (ox * ox + oy * oy).sqrt() + qx.max(qy).min(0.0) - r
 }
 
-/// Signed distance in cell units (cell is the unit square centered at 0).
-/// Unknown characters fall back to a dot.
-fn sdf(glyph: char, x: f32, y: f32) -> f32 {
-    match glyph {
+/// Characters with a shape, one per look (aliases aside), for messages.
+pub const SUPPORTED: &str = ". - + | = : # o x";
+
+/// Whether `c` has a shape (see [`SUPPORTED`]); `' '` is the blank.
+pub fn supported(c: char) -> bool {
+    shape(c, 0.0, 0.0).is_some()
+}
+
+/// Signed distance in cell units (cell is the unit square centered at 0),
+/// or `None` for a character without a shape.
+fn shape(glyph: char, x: f32, y: f32) -> Option<f32> {
+    Some(match glyph {
         ' ' => f32::INFINITY,
         '-' => sd_box(x, y, 0.32, 0.13, 0.01),
         '+' => sd_box(x, y, 0.375, 0.125, 0.0).min(sd_box(x, y, 0.125, 0.375, 0.0)),
@@ -33,8 +41,15 @@ fn sdf(glyph: char, x: f32, y: f32) -> f32 {
             let (u, v) = ((x + y) * s, (x - y) * s);
             sd_box(u, v, 0.49, 0.094, 0.0).min(sd_box(v, u, 0.49, 0.094, 0.0))
         }
-        _ => (x * x + y * y).sqrt() - 0.175,
-    }
+        '.' => (x * x + y * y).sqrt() - 0.175,
+        _ => return None,
+    })
+}
+
+/// [`shape`], with unknown characters drawn as a dot (the CLI rejects them;
+/// this keeps library callers from crashing).
+fn sdf(glyph: char, x: f32, y: f32) -> f32 {
+    shape(glyph, x, y).unwrap_or_else(|| shape('.', x, y).unwrap())
 }
 
 /// Glyph index and morph progress toward the next glyph for value `v`.
@@ -111,6 +126,17 @@ mod tests {
         assert!(mask(&RAMP, 0, 0.0, 32).iter().all(|&a| a == 0));
         for (g, c) in RAMP.iter().enumerate().skip(1) {
             assert!(mask(&RAMP, g, 0.0, 32).contains(&255), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn supported_glyphs() {
+        for c in SUPPORTED.split(' ').chain([" ", "O", "0", "X", "*", "█"]) {
+            let c = c.chars().next().unwrap_or(' ');
+            assert!(supported(c), "{c:?}");
+        }
+        for c in ['?', 'a', '/', '\t'] {
+            assert!(!supported(c), "{c:?}");
         }
     }
 

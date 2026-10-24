@@ -114,6 +114,43 @@ fn incremental_paint_matches_full_repaint_and_damage_covers_changes() {
     });
 }
 
+/// Total dye displacement after a slow 1 s pointer drag (8 cells/s, below
+/// the solver's speed clamp), run as app frames at `fps`.
+fn drag_stir(fps: f32) -> f32 {
+    let cfg = config();
+    let (mut sim, r) = setup(&cfg, Level::new());
+    let (cols, rows) = (r.layout.cols, r.layout.rows);
+    let rest: Vec<f32> = (0..rows)
+        .flat_map(|y| sim.dye_row(y)[..cols].to_vec())
+        .collect();
+    let dt = 1.0 / fps;
+    let x = |t: f32| cols as f32 * 0.3 + 8.0 * t;
+    let y = rows as f32 * 0.5;
+    for f in 1..=fps.round() as usize {
+        sim.push(x((f - 1) as f32 * dt), y, x(f as f32 * dt), y);
+        sim.advance(dt);
+    }
+    (0..rows)
+        .flat_map(|y| sim.dye_row(y)[..cols].to_vec())
+        .zip(rest)
+        .map(|(a, b)| (a - b).abs())
+        .sum()
+}
+
+/// The same pointer gesture stirs the fluid about equally at any frame rate.
+#[test]
+fn pointer_force_is_frame_rate_independent() {
+    let base = drag_stir(60.0);
+    for fps in [20.0, 30.0, 144.0] {
+        let ratio = drag_stir(fps) / base;
+        eprintln!("{fps:>5} fps: stir ratio vs 60 fps {ratio:.3}");
+        assert!(
+            (0.8..1.25).contains(&ratio),
+            "{fps} fps stirs {ratio:.2}x as much as 60 fps"
+        );
+    }
+}
+
 /// Dye field after a fixed number of workload frames at `level`.
 fn dye_after(cfg: &Config, level: Level, frames: usize) -> Vec<f32> {
     let (mut sim, r) = setup(cfg, level);

@@ -62,6 +62,28 @@ use crate::{
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
 const BTN_MIDDLE: u32 = 0x112;
+/// Retry delay after a failed present (shm allocation, attach).
+const RETRY: Duration = Duration::from_secs(1);
+
+/// Outcome of [`App::present`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Present {
+    Committed,
+    /// Nothing changed (or no view).
+    Skipped,
+    /// Every buffer is held by the compositor.
+    Busy,
+    /// An shm error; already logged.
+    Failed,
+}
+
+/// Logs an shm error once per outage (until the next successful present).
+fn shm_failed(ok: &mut bool, what: &str, e: impl std::fmt::Display) -> Present {
+    if std::mem::take(ok) {
+        eprintln!("situ: {what}: {e} (retrying every {}s)", RETRY.as_secs());
+    }
+    Present::Failed
+}
 
 struct Buf {
     buffer: Buffer,
@@ -100,6 +122,7 @@ pub struct App {
     shm: Shm,
     /// Created on demand; dropped in static mode once every output is drawn.
     pool: Option<SlotPool>,
+    /// False while presents fail, so each outage is logged once.
     shm_ok: bool,
     cursor_shape: Option<CursorShapeManager>,
     /// Fractional scaling needs both globals.
@@ -199,19 +222,22 @@ impl App {
             Some((_, viewport)) => viewport.set_destination(out.size.0 as i32, out.size.1 as i32),
             None => out.layer.wl_surface().set_buffer_scale(out.scale as i32),
         }
-        self.present(i);
+        // Nothing else retries a failed first frame: the output would stay
+        // blank until pointer input.
+        if self.present(i) == Present::Failed {
+            self.schedule_in(i, RETRY);
+        }
     }
 
-    /// Paints changed cells into a free buffer and commits. Returns whether
-    /// a buffer was committed.
-    fn present(&mut self, i: usize) -> bool {
+    /// Paints changed cells into a free buffer and commits.
+    fn present(&mut self, i: usize) -> Present {
         let out = &mut self.outs[i];
         let Some(view) = out.view.as_mut() else {
-            return false;
+            return Present::Skipped;
         };
         view.renderer.sync(&mut view.sim);
         if !view.renderer.has_damage() {
-            return false;
+            return Present::Skipped;
         }
         let l = &view.renderer.layout;
         let (w, h) = (l.width as i32, l.height as i32);
@@ -219,12 +245,7 @@ impl App {
             Some(p) => p,
             None => match SlotPool::new((w * h * 4) as usize, &self.shm) {
                 Ok(p) => self.pool.insert(p),
-                Err(e) => {
-                    if std::mem::take(&mut self.shm_ok) {
-                        eprintln!("situ: shm pool: {e}");
-                    }
-                    return false;
-                }
+                Err(e) => return shm_failed(&mut self.shm_ok, "shm pool", e),
             },
         };
         let free = view
@@ -234,31 +255,33 @@ impl App {
         let idx = match free {
             Some(idx) => idx,
             None if view.bufs.len() < 3 => {
-                let Ok((buffer, _)) = pool.create_buffer(w, h, w * 4, wl_shm::Format::Xrgb8888)
-                else {
-                    return false;
+                let buffer = match pool.create_buffer(w, h, w * 4, wl_shm::Format::Xrgb8888) {
+                    Ok((buffer, _)) => buffer,
+                    Err(e) => return shm_failed(&mut self.shm_ok, "shm buffer", e),
                 };
                 let state = view.renderer.add_buffer();
                 view.bufs.push(Buf { buffer, state });
                 view.bufs.len() - 1
             }
             // Compositor holds every buffer; retry on the next tick.
-            None => return false,
+            None => return Present::Busy,
         };
         let buf = &view.bufs[idx];
         let Some(canvas) = buf.buffer.canvas(pool) else {
-            return false;
+            return Present::Busy;
         };
         view.renderer
             .paint(view.sim.level(), buf.state, canvas, (w * 4) as usize);
 
         let surface = out.layer.wl_surface();
+        // Attach before taking damage, so a failure keeps it for the retry.
+        if let Err(e) = buf.buffer.attach_to(surface) {
+            return shm_failed(&mut self.shm_ok, "attach buffer", e);
+        }
         for (x, y, rw, rh) in view.renderer.take_damage() {
             surface.damage_buffer(x, y, rw, rh);
         }
-        if buf.buffer.attach_to(surface).is_err() {
-            return false;
-        }
+        self.shm_ok = true;
         if !self.cfg.interactive {
             out.layer.commit();
             // The compositor has (or will copy) the pixels; free everything.
@@ -266,25 +289,31 @@ impl App {
             if self.outs.iter().all(|o| o.view.is_none()) {
                 self.pool = None;
             }
-            return true;
+            return Present::Committed;
         }
         surface.frame(&self.qh, surface.clone());
         out.frame_pending = true;
         out.layer.commit();
-        true
+        Present::Committed
     }
 
+    /// Schedules the next tick: immediately when waking from idle, else at
+    /// the frame cap.
     fn schedule(&mut self, i: usize) {
-        let interval = self.interval();
+        let out = &self.outs[i];
+        let wait = if out.idle {
+            Duration::ZERO
+        } else {
+            self.interval().saturating_sub(out.last.elapsed())
+        };
+        self.schedule_in(i, wait);
+    }
+
+    fn schedule_in(&mut self, i: usize, wait: Duration) {
         let out = &mut self.outs[i];
         if out.frame_pending || out.timer.is_some() || out.view.is_none() {
             return;
         }
-        let wait = if out.idle {
-            Duration::ZERO
-        } else {
-            interval.saturating_sub(out.last.elapsed())
-        };
         let id = out.layer.wl_surface().id();
         let token = self
             .handle
@@ -320,21 +349,18 @@ impl App {
             (now - out.last).as_secs_f32().min(0.1)
         };
         out.last = now;
-        // Fixed-ish substeps keep the solver stable when frames are slow.
-        let steps = (dt * 60.0).ceil().clamp(1.0, 4.0) as usize;
-        for _ in 0..steps {
-            view.sim.step(dt / steps as f32);
-        }
+        view.sim.advance(dt);
         let active = view.sim.active();
         out.idle = !active;
-        let committed = self.present(i);
-        // Retry if the screen is stale (e.g. every buffer was still busy).
-        let stale = self.outs[i]
-            .view
-            .as_ref()
-            .is_some_and(|v| v.renderer.has_damage());
-        if !committed && (active || stale) {
-            self.schedule(i);
+        match self.present(i) {
+            // The frame callback schedules the next tick.
+            Present::Committed => {}
+            // Out of memory or similar: don't spin at the frame cap.
+            Present::Failed => self.schedule_in(i, RETRY),
+            // The screen is stale until a buffer frees up.
+            Present::Busy => self.schedule(i),
+            Present::Skipped if active => self.schedule(i),
+            Present::Skipped => {}
         }
     }
 
@@ -342,7 +368,25 @@ impl App {
         self.schedule(i);
     }
 
+    /// Ambient flow is app-wide: it applies to every output and survives
+    /// rebuilds (resize, scale changes), which start from `cfg.params`.
+    fn toggle_ambient(&mut self) {
+        self.cfg.params.ambient_on.toggle();
+        for i in 0..self.outs.len() {
+            if let Some(view) = self.outs[i].view.as_mut() {
+                view.sim.p.ambient_on = self.cfg.params.ambient_on;
+            }
+            self.wake(i);
+        }
+    }
+
     fn pointer_event(&mut self, i: usize, ev: &PointerEvent) {
+        if let PointerEventKind::Press {
+            button: BTN_MIDDLE, ..
+        } = ev.kind
+        {
+            return self.toggle_ambient();
+        }
         let out = &mut self.outs[i];
         let Some(view) = out.view.as_mut() else {
             return;
@@ -373,7 +417,6 @@ impl App {
             PointerEventKind::Press { button, .. } => match button {
                 BTN_LEFT => view.sim.burst(cx, cy, 40.0),
                 BTN_RIGHT => view.sim.burst(cx, cy, -40.0),
-                BTN_MIDDLE => view.sim.p.ambient_on.toggle(),
                 _ => return,
             },
             PointerEventKind::Axis { vertical, .. } => {

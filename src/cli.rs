@@ -3,6 +3,7 @@
 use crate::Config;
 use crate::color::{Palette, parse_hex};
 use crate::field::Style;
+use crate::glyph;
 use crate::sim::Params;
 
 pub const HELP: &str = "\
@@ -21,7 +22,8 @@ Color:
   --gamma F         color curve along the ramp (default 1.2)
 
 Look:
-  --ramp STR        glyph ramp, darkest first, ' ' = blank (default ' .-+ox')
+  --ramp STR        glyph ramp, darkest first, from . - + | = : # o x and
+                    ' ' = blank (default ' .-+ox')
   --rows N          cell rows per screen height (default 54)
   --scale F         noise feature size in cells (default 14)
   --octaves N       noise octaves (default 4)
@@ -95,6 +97,12 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Cmd, String> {
                 style.ramp = val()?.chars().collect();
                 if !(2..=16).contains(&style.ramp.len()) {
                     return Err("--ramp needs 2..=16 glyphs".into());
+                }
+                if let Some(c) = style.ramp.iter().find(|&&c| !glyph::supported(c)) {
+                    return Err(format!(
+                        "--ramp: no glyph for {c:?}; use {} or ' ' (blank)",
+                        glyph::SUPPORTED
+                    ));
                 }
             }
             "--gamma" => style.gamma = num(val()?)?.max(0.05),
@@ -170,6 +178,8 @@ mod tests {
         assert!(run(&["--rows"]).is_err());
         assert!(run(&["--rows", "nan"]).is_err());
         assert!(run(&["--ramp", "x"]).is_err());
+        assert!(run(&["--ramp", " .a"]).is_err());
+        assert!(run(&["--ramp", " .-+ox|=:#"]).is_ok());
         assert!(run(&["--bogus"]).is_err());
         assert!(matches!(parse(["-h".to_string()]), Ok(Cmd::Help)));
     }

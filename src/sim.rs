@@ -22,6 +22,11 @@ const DRAG: f32 = 0.6;
 const DYE_SNAP: f32 = 0.04;
 /// Linear dye relaxation (glyph steps/s) on top of the exponential one.
 const DYE_LIN: f32 = 0.35;
+/// Substeps per frame cap: frames up to 1/15 s keep steps <= 1/60 s (CFL).
+const MAX_SUBSTEPS: f32 = 4.0;
+/// Velocity (dye cells/s) added per dye cell of pointer travel. Per distance,
+/// not per time, so a gesture injects the same momentum at any frame rate.
+const PUSH_GAIN: f32 = 36.0;
 
 #[derive(Clone, Debug)]
 pub struct Params {
@@ -311,6 +316,15 @@ impl Sim {
         self.splats.push(Splat::Swirl { x, y, strength });
     }
 
+    /// Advances one app frame of `dt` seconds, in substeps of <= 1/60 s
+    /// (for frames up to 1/15 s) so advection stays within CFL <= 1.
+    pub fn advance(&mut self, dt: f32) {
+        let steps = (dt * 60.0).ceil().clamp(1.0, MAX_SUBSTEPS) as usize;
+        for _ in 0..steps {
+            self.step(dt / steps as f32);
+        }
+    }
+
     /// Advances the simulation by `dt` seconds (must be <= 1/60 for CFL).
     pub fn step(&mut self, dt: f32) {
         let level = self.level;
@@ -327,7 +341,7 @@ impl Sim {
         60.0 / self.k as f32
     }
 
-    fn apply_splats(&mut self, dt: f32) {
+    fn apply_splats(&mut self) {
         let k = self.k as f32;
         let r = (self.p.radius / k).max(0.75);
         let r2 = r * r;
@@ -350,7 +364,7 @@ impl Sim {
                     let (fx, fy) = match s {
                         // Pointer delta (dye cells) -> velocity (vel cells/s).
                         Splat::Push { dx, dy, .. } => {
-                            let gain = self.p.force * 0.6 / (k * dt.max(1.0 / 240.0));
+                            let gain = self.p.force * PUSH_GAIN / k;
                             (dx * gain, dy * gain)
                         }
                         Splat::Burst { strength, .. } => {
@@ -814,7 +828,7 @@ fn runs(flags: &[bool]) -> impl Iterator<Item = (usize, usize)> + '_ {
 fn step_impl<S: Simd>(simd: S, s: &mut Sim, dt: f32) {
     s.time += dt;
     if !s.splats.is_empty() {
-        s.apply_splats(dt);
+        s.apply_splats();
     }
     if s.ambient() {
         s.ambient_force(dt);

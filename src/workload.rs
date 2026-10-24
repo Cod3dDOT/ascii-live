@@ -48,16 +48,12 @@ pub fn episode(
     mut frame: impl FnMut(&mut Sim, f32),
 ) -> usize {
     let dt = 1.0 / fps;
-    // Same substepping as the app: steps <= 1/60 s keep advection CFL <= 1.
-    let steps = (dt * 60.0).ceil().max(1.0) as usize;
     let mut f = 0;
     loop {
         f += 1;
         let t = f as f32 * dt;
         input(sim, t, dt, cols, rows);
-        for _ in 0..steps {
-            sim.step(dt / steps as f32);
-        }
+        sim.advance(dt);
         frame(sim, t);
         if (t > SWIPE && !sim.active()) || t > MAX_SECONDS {
             return f;
